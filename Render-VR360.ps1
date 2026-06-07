@@ -74,8 +74,8 @@ Write-Host "    Source : $SourceFolder"
 Write-Host "    Output : $outputFile"
 
 # ── Find frame sequence ──────────────────────────────────────────────────────
-$pngFrames = Get-ChildItem $SourceFolder -Filter "*_??????.png"  | Sort-Object Name
-$jpgFrames = Get-ChildItem $SourceFolder -Filter "*_??????.jpg"  | Sort-Object Name
+$pngFrames = @(Get-ChildItem $SourceFolder -Filter "*_??????.png" | Sort-Object Name)
+$jpgFrames = @(Get-ChildItem $SourceFolder -Filter "*_??????.jpg" | Sort-Object Name)
 
 if ($pngFrames.Count -ge $jpgFrames.Count -and $pngFrames.Count -gt 0) {
     $frames     = $pngFrames
@@ -88,9 +88,9 @@ if ($pngFrames.Count -ge $jpgFrames.Count -and $pngFrames.Count -gt 0) {
     exit 1
 }
 
-# Derive pattern from first frame name: basename_000000.ext → basename_%06d.ext
-$firstFrame  = $frames[0].Name
-$pattern     = $firstFrame -replace '_\d{6}\.' + $ext + '$', "_%06d.$ext"
+# Derive pattern from first frame name: basename_000000.ext -> basename_%06d.ext
+$baseName    = $frames[0].BaseName -replace '_\d{6}$', ''
+$pattern     = "${baseName}_%06d.${ext}"
 $inputFrames = Join-Path $SourceFolder $pattern
 
 Write-Host "    Frames : $($frames.Count) x .$ext  ($pattern)"
@@ -119,14 +119,15 @@ if (-not $ExifToolPath) {
     if ($found) { $ExifToolPath = $found.Source }
 }
 if (-not $ExifToolPath -or -not (Test-Path $ExifToolPath)) {
-    Write-Warning "exiftool not found — spherical metadata will NOT be injected. Install from https://exiftool.org or pass -ExifToolPath."
+    Write-Warning "exiftool not found - spherical metadata will NOT be injected. Install from https://exiftool.org or pass -ExifToolPath."
     $ExifToolPath = $null
 }
 
 # ── Try hevc_nvenc first, fall back to libx265 ───────────────────────────────
 function Invoke-FFmpeg {
-    param([string[]]$Args)
-    & ffmpeg @Args 2>&1
+    param([string[]]$FfmpegArgs)
+    $ErrorActionPreference = "Continue"
+    & ffmpeg @FfmpegArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
     return $LASTEXITCODE
 }
 
@@ -161,7 +162,7 @@ if ($exitCode -ne 0 -or -not (Test-Path $outputFile) -or (Get-Item $outputFile).
         "-c:v", "libx265",
         "-tune:v", "fastdecode",
         "-level:v", "6.2",
-        "-crf", $Crf,
+        "-crf", [string]$Crf,
         $outputFile
     )
 
