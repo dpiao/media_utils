@@ -71,6 +71,43 @@ def probe_resolution(frame: Path) -> tuple[int, int]:
     return int(w), int(h)
 
 
+STANDARD_FPS = (30, 60)
+FPS_TOLERANCE = 2.0
+
+
+def probe_audio_duration(audio: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(audio)],
+        capture_output=True, text=True, check=True,
+    )
+    return float(result.stdout.strip())
+
+
+def detect_framerate(frame_count: int, audio: Path) -> int:
+    """Infer fps from frame count / audio duration; must be close to 30 or 60."""
+    duration = probe_audio_duration(audio)
+    if duration <= 0:
+        die(f"Invalid audio duration: {duration}s")
+
+    detected = frame_count / duration
+    nearest = min(STANDARD_FPS, key=lambda f: abs(detected - f))
+    delta = abs(detected - nearest)
+
+    info(f"Audio   : {audio.name}  ({duration:.3f}s)")
+    info(f"Detected: {detected:.2f} fps  (frames / audio)")
+
+    if delta > FPS_TOLERANCE:
+        die(
+            f"Detected framerate {detected:.2f} fps does not match 30 or 60 fps "
+            f"(nearest: {nearest}, off by {delta:.2f}). "
+            f"Check VAM render settings or pass -r explicitly."
+        )
+
+    info(f"Using   : {nearest} fps")
+    return nearest
+
+
 # ── ffmpeg with live progress ─────────────────────────────────────────────────
 
 def run_ffmpeg(args: list[str], total_frames: int, label: str) -> bool:
@@ -148,17 +185,17 @@ def build_common_args(
     audio: Path | None,
     framerate: int,
     resolution: str | None,
-    output: Path,
+    audio_offset: float,
 ) -> list[str]:
     vf_parts = ["format=yuv420p"]
     if resolution:
         vf_parts.insert(0, f"scale={resolution}")
 
-    args = [
-        "-y",
-        "-framerate", str(framerate),
-        "-i", str(pattern),
-    ]
+    args = ["-y", "-framerate", str(framerate)]
+    # Positive offset delays video so audio begins first in the output timeline.
+    if audio and audio_offset != 0:
+        args += ["-itsoffset", str(audio_offset)]
+    args += ["-i", str(pattern)]
     if audio:
         args += ["-i", str(audio), "-c:a", "aac", "-b:a", "192k"]
     else:
@@ -178,12 +215,13 @@ def encode(
     total_frames: int,
     framerate: int,
     resolution: str | None,
+    audio_offset: float,
     crf: int,
     cq: int,
     output: Path,
 ) -> str:
     """Try hevc_nvenc, fall back to libx265. Returns encoder name used."""
-    common = build_common_args(pattern, audio, framerate, resolution, output)
+    common = build_common_args(pattern, audio, framerate, resolution, audio_offset)
 
     step("Encoding with hevc_nvenc (GPU)")
     nvenc_args = common + ["-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(cq), str(output)]
@@ -210,13 +248,18 @@ def main() -> None:
     )
     parser.add_argument("source", nargs="?", default=".",
                         help="Folder with frame sequence and WAV (default: current dir)")
-    parser.add_argument("-r", "--framerate", type=int, default=60)
+    parser.add_argument("-r", "--framerate", type=int, default=None,
+                        help="Output framerate (default: auto-detect from frames/audio)")
     parser.add_argument("--crf", type=int, default=20, help="libx265 quality (0–51, lower=better)")
     parser.add_argument("--cq",  type=int, default=20, help="hevc_nvenc quality (0–51, lower=better)")
     parser.add_argument("--resolution", help="Scale output, e.g. 3840x1920")
     parser.add_argument("--stereo", default="mono",
                         choices=["mono", "left-right", "top-bottom"])
     parser.add_argument("--output-name", help="Base name for output file (default: folder name)")
+    parser.add_argument(
+        "--audio-offset", type=float, default=-0.3,
+        help="Seconds audio leads video when muxing (negative = video leads; default: -0.3, use 0 to disable)",
+    )
     args = parser.parse_args()
 
     # Dependency checks
@@ -246,15 +289,33 @@ def main() -> None:
     audio = find_audio(source)
     w, h = probe_resolution(frames[0])
 
-    info(f"Frames  : {len(frames)} x .{ext}  ({w}x{h})  @ {args.framerate} fps")
-    info(f"Audio   : {audio.name if audio else 'none'}")
+    info(f"Frames  : {len(frames)} x .{ext}  ({w}x{h})")
+
+    if args.framerate is not None:
+        framerate = args.framerate
+        info(f"Framerate: {framerate} fps (manual)")
+        if audio:
+            info(f"Audio   : {audio.name}")
+    elif audio:
+        framerate = detect_framerate(len(frames), audio)
+    else:
+        die("No audio file found — cannot auto-detect framerate. Pass -r explicitly.")
+
     if args.resolution:
         info(f"Scale   : {args.resolution}")
+    if audio and args.audio_offset != 0:
+        if args.audio_offset > 0:
+            info(f"AV sync : audio leads video by {args.audio_offset:g}s")
+        else:
+            info(f"AV sync : video leads audio by {-args.audio_offset:g}s")
 
     # Encode
     import time
     t0 = time.perf_counter()
-    encoder = encode(pattern, audio, len(frames), args.framerate, args.resolution, args.crf, args.cq, output)
+    encoder = encode(
+        pattern, audio, len(frames), framerate, args.resolution,
+        args.audio_offset if audio else 0.0, args.crf, args.cq, output,
+    )
     elapsed = time.perf_counter() - t0
 
     enc_fps = len(frames) / elapsed if elapsed > 0 else 0
