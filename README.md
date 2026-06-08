@@ -4,7 +4,7 @@ Personal scripts for video post-processing.
 
 ---
 
-## Render-VR360.ps1
+## render_vr360.py
 
 Assembles a [VAM Video Renderer](https://hub.virtamate.com/resources/video-renderer-for-3d-vr180-vr360-and-flat-2d-audio-bvh-animation-recorder.11994/) frame sequence (PNG or JPG + WAV) into a 360 monoscopic VR video with proper spherical metadata.
 
@@ -13,51 +13,53 @@ Assembles a [VAM Video Renderer](https://hub.virtamate.com/resources/video-rende
 | Tool | Purpose | Install |
 |---|---|---|
 | [FFmpeg](https://ffmpeg.org) | Encoding | `winget install Gyan.FFmpeg` |
-| [exiftool](https://exiftool.org) | 360 metadata injection | Download from exiftool.org, rename to `exiftool.exe`, add to PATH |
+| [exiftool](https://exiftool.org) | 360 metadata injection | Download zip, rename to `exiftool.exe`, place in `~/bin` |
+| Python 3.10+ | Script runtime | `winget install Python.Python.3` |
 
 ### Usage
 
-```powershell
+```bash
 # Basic — auto-detects frames, audio, names output after folder
-.\Render-VR360.ps1 -SourceFolder "C:\Games\Vam\Saves\VR_Renders\20260607-002259"
+python render_vr360.py "C:\Games\Vam\Saves\VR_Renders\20260607-002259"
 
-# Custom framerate and explicit exiftool path
-.\Render-VR360.ps1 -SourceFolder ".\my_render" -Framerate 30 -ExifToolPath "C:\tools\exiftool.exe"
+# Custom framerate
+python render_vr360.py .\my_render -r 30
 
-# Scale down to 4K output (e.g. for faster encode or player compatibility)
-.\Render-VR360.ps1 -SourceFolder ".\my_render" -Resolution 3840x1920
+# Scale down to 4K (faster encode / broader player support)
+python render_vr360.py .\my_render --resolution 3840x1920
 ```
 
-### Parameters
+### Options
 
-| Parameter | Default | Description |
+| Flag | Default | Description |
 |---|---|---|
-| `-SourceFolder` | `.` | Folder with frame sequence and WAV |
-| `-Framerate` | `60` | Output video framerate |
-| `-Crf` | `20` | libx265 quality (lower = better, 0–51) |
-| `-Cq` | `20` | hevc_nvenc quality (lower = better, 0–51) |
-| `-Resolution` | source | Scale output, e.g. `3840x1920` |
-| `-StereoMode` | `mono` | `mono`, `left-right`, or `top-bottom` |
-| `-OutputName` | folder name | Base name for output file |
-| `-ExifToolPath` | auto | Path to `exiftool.exe` |
+| `source` | `.` | Folder with frame sequence and WAV |
+| `-r`, `--framerate` | `60` | Output video framerate |
+| `--crf` | `20` | libx265 quality (0–51, lower = better) |
+| `--cq` | `20` | hevc_nvenc quality (0–51, lower = better) |
+| `--resolution` | source res | Scale output, e.g. `3840x1920` |
+| `--stereo` | `mono` | `mono`, `left-right`, or `top-bottom` |
+| `--output-name` | folder name | Base name for output file |
 
 ### Output
 
-A file named `{OutputName}_360mono.mp4` (or `_360left-right.mp4` etc.) is created inside a `rendered/` subfolder of the source folder.
+`{source}/rendered/{name}_360mono.mp4` (or `_360left-right.mp4` etc.)
 
 ### Encoder strategy
 
-1. Tries **hevc_nvenc** (NVIDIA GPU) first — typically ~50% faster
-2. Falls back to **libx265** (CPU) automatically if GPU encoding fails
-3. Both use quality-based rate control (CRF/CQ 20) per the VAM plugin's recommendation
-4. Prepends `format=yuv420p` in the filter chain to fix the RGB→YUV conversion issue with NVENC and 8K PNG input
+1. **hevc_nvenc** (NVIDIA GPU) — tried first, typically ~50% faster
+2. **libx265** (CPU) — automatic fallback if GPU encoding fails
+
+Both use quality-based rate control (CQ/CRF 20) per the VAM plugin's recommendation.
+A `format=yuv420p` filter is prepended to fix the RGB→YUV conversion issue that causes NVENC to stall on 8K PNG input.
 
 ### Spherical metadata
 
-Injects Google Spatial Media–compatible XMP tags:
-- `ProjectionType = equirectangular`
-- `Spherical = true`
-- `Stitched = true`
-- `StereoMode = mono` (or as specified)
+Injects Google Spatial Media–compatible XMP tags recognized by YouTube, DeoVR, VirtualDesktop, Meta Quest, and most other 360 players:
 
-Recognized by YouTube, DeoVR, VirtualDesktop, Meta Quest video players, and most other 360 players.
+```
+ProjectionType = equirectangular
+Spherical      = true
+Stitched       = true
+StereoMode     = mono
+```
