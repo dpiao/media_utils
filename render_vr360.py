@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -35,6 +36,60 @@ def warn(msg: str) -> None:
 def die(msg: str) -> None:
     print(f"\n[FAIL] {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+DEFAULT_VR_RENDERS = Path(r"C:\Games\Vam\Saves\VR_Renders")
+DEFAULT_OUTPUT_DIR = Path(r"C:\Movies\V Vam My Render")
+RENDER_COMPLETE_MARKER = "_RENDER_COMPLETE_.txt"
+
+
+class RenderError(Exception):
+    pass
+
+
+def has_frame_sequence(folder: Path) -> bool:
+    return any(folder.glob("*_??????.png")) or any(folder.glob("*_??????.jpg"))
+
+
+def is_render_complete(folder: Path) -> bool:
+    return (folder / RENDER_COMPLETE_MARKER).is_file()
+
+
+def find_pending_folders(renders_root: Path = DEFAULT_VR_RENDERS, force: bool = False) -> list[Path]:
+    """Return finished capture folders (frames + WAV) not yet rendered."""
+    if not renders_root.is_dir():
+        die(f"VR renders folder not found: {renders_root}")
+
+    pending: list[Path] = []
+    for folder in renders_root.iterdir():
+        if not folder.is_dir():
+            continue
+        if not has_frame_sequence(folder):
+            continue
+        if not is_export_complete(folder):
+            continue
+        if is_render_complete(folder) and not force:
+            continue
+        pending.append(folder)
+
+    return sorted(pending, key=lambda p: p.name)
+
+
+def write_render_complete(source: Path, output: Path) -> None:
+    marker = source / RENDER_COMPLETE_MARKER
+    size = output.stat().st_size
+    marker.write_text(
+        f"directory: {output.parent}\n"
+        f"file name: {output.name}\n"
+        f"file size: {size}\n",
+        encoding="utf-8",
+    )
+    ok(f"Marked complete: {marker}")
+
+
+def exit_notice(msg: str) -> None:
+    print(f"\n{msg}\n")
+    sys.exit(0)
 
 
 # ── Frame/audio discovery ─────────────────────────────────────────────────────
@@ -59,6 +114,11 @@ def find_audio(source: Path) -> Path | None:
     return wavs[-1] if wavs else None
 
 
+def is_export_complete(folder: Path) -> bool:
+    """VAM writes the WAV when the capture export has finished."""
+    return find_audio(folder) is not None
+
+
 # ── ffprobe helper ────────────────────────────────────────────────────────────
 
 def probe_resolution(frame: Path) -> tuple[int, int]:
@@ -69,6 +129,35 @@ def probe_resolution(frame: Path) -> tuple[int, int]:
     )
     w, h = result.stdout.strip().split(",")
     return int(w), int(h)
+
+
+VR_MIN_PX = 5760  # 6k — below this, auto-render flat (no VR metadata)
+
+
+def is_vr_resolution(width: int, height: int) -> bool:
+    return max(width, height) >= VR_MIN_PX
+
+
+def resolution_label(width: int, height: int) -> str:
+    """Map frame size to a short suffix (8k / 6k / 4k / 1080p)."""
+    px = max(width, height)
+    if px >= 7680:
+        return "8k"
+    if px >= VR_MIN_PX:
+        return "6k"
+    if px >= 3840:
+        return "4k"
+    if px >= 1920:
+        return "1080p"
+    return f"{height}p"
+
+
+def output_suffix(flat: bool, stereo: str, width: int, height: int, framerate: int) -> str:
+    res = resolution_label(width, height)
+    fps = f"{framerate}fps"
+    if flat:
+        return f"{res} {fps}"
+    return f"360{stereo} {res} {fps}"
 
 
 STANDARD_FPS = (30, 60)
@@ -98,7 +187,7 @@ def detect_framerate(frame_count: int, audio: Path) -> int:
     info(f"Detected: {detected:.2f} fps  (frames / audio)")
 
     if delta > FPS_TOLERANCE:
-        die(
+        raise RenderError(
             f"Detected framerate {detected:.2f} fps does not match 30 or 60 fps "
             f"(nearest: {nearest}, off by {delta:.2f}). "
             f"Check VAM render settings or pass -r explicitly."
@@ -163,19 +252,32 @@ def run_ffmpeg(args: list[str], total_frames: int, label: str) -> bool:
 
 def inject_metadata(mp4: Path, stereo_mode: str) -> None:
     step("Injecting 360 spherical metadata")
-    subprocess.run(
-        [
-            "exiftool",
-            "-XMP-GSpherical:Spherical=true",
-            "-XMP-GSpherical:Stitched=true",
-            "-XMP-GSpherical:ProjectionType=equirectangular",
-            f"-XMP-GSpherical:StereoMode={stereo_mode}",
-            "-overwrite_original",
-            str(mp4),
-        ],
-        check=True, capture_output=True
+    args = [
+        "exiftool",
+        "-XMP-GSpherical:Spherical=true",
+        "-XMP-GSpherical:Stitched=true",
+        "-XMP-GSpherical:ProjectionType=equirectangular",
+        f"-XMP-GSpherical:StereoMode={stereo_mode}",
+        "-overwrite_original",
+        str(mp4),
+    ]
+
+    last_err = ""
+    for attempt in range(1, 6):
+        result = subprocess.run(args, capture_output=True, text=True)
+        if result.returncode == 0:
+            ok(f"equirectangular / {stereo_mode}")
+            return
+        last_err = (result.stderr or result.stdout or "").strip()
+        if attempt < 5:
+            warn(f"exiftool busy or file locked (attempt {attempt}/5), retrying...")
+            time.sleep(2)
+
+    raise RenderError(
+        f"Metadata injection failed after 5 attempts.\n"
+        f"  Video was encoded successfully: {mp4}\n"
+        f"  exiftool: {last_err or 'unknown error'}"
     )
-    ok(f"equirectangular / {stereo_mode}")
 
 
 # ── Encoding ──────────────────────────────────────────────────────────────────
@@ -184,12 +286,9 @@ def build_common_args(
     pattern: Path,
     audio: Path | None,
     framerate: int,
-    resolution: str | None,
     audio_offset: float,
 ) -> list[str]:
     vf_parts = ["format=yuv420p"]
-    if resolution:
-        vf_parts.insert(0, f"scale={resolution}")
 
     args = ["-y", "-framerate", str(framerate)]
     # Positive offset delays video so audio begins first in the output timeline.
@@ -214,14 +313,13 @@ def encode(
     audio: Path | None,
     total_frames: int,
     framerate: int,
-    resolution: str | None,
     audio_offset: float,
     crf: int,
     cq: int,
     output: Path,
 ) -> str:
     """Try hevc_nvenc, fall back to libx265. Returns encoder name used."""
-    common = build_common_args(pattern, audio, framerate, resolution, audio_offset)
+    common = build_common_args(pattern, audio, framerate, audio_offset)
 
     step("Encoding with hevc_nvenc (GPU)")
     nvenc_args = common + ["-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(cq), str(output)]
@@ -235,61 +333,40 @@ def encode(
     step("Encoding with libx265 (CPU)")
     x265_args = common + ["-c:v", "libx265", "-tune:v", "fastdecode", "-level:v", "6.2", "-crf", str(crf), str(output)]
     if not run_ffmpeg(x265_args, total_frames, "libx265  "):
-        die("Encoding failed with both hevc_nvenc and libx265.")
+        raise RenderError("Encoding failed with both hevc_nvenc and libx265.")
 
     return "libx265"
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Assemble VAM frame sequence into a 360 VR video."
-    )
-    parser.add_argument("source", nargs="?", default=".",
-                        help="Folder with frame sequence and WAV (default: current dir)")
-    parser.add_argument("-r", "--framerate", type=int, default=None,
-                        help="Output framerate (default: auto-detect from frames/audio)")
-    parser.add_argument("--crf", type=int, default=20, help="libx265 quality (0–51, lower=better)")
-    parser.add_argument("--cq",  type=int, default=20, help="hevc_nvenc quality (0–51, lower=better)")
-    parser.add_argument("--resolution", help="Scale output, e.g. 3840x1920")
-    parser.add_argument("--stereo", default="mono",
-                        choices=["mono", "left-right", "top-bottom"])
-    parser.add_argument("--output-name", help="Base name for output file (default: folder name)")
-    parser.add_argument(
-        "--audio-offset", type=float, default=-0.3,
-        help="Seconds audio leads video when muxing (negative = video leads; default: -0.3, use 0 to disable)",
-    )
-    args = parser.parse_args()
-
-    # Dependency checks
-    for tool in ("ffmpeg", "ffprobe", "exiftool"):
-        if not shutil.which(tool):
-            die(f"'{tool}' not found on PATH. Please install it first.")
-
-    source = Path(args.source).resolve()
-    if not source.is_dir():
-        die(f"Source folder not found: {source}")
+def render_one(source: Path, args: argparse.Namespace) -> Path | None:
+    """Render a single capture folder. Returns output path, or None if skipped."""
+    if is_render_complete(source) and not args.force:
+        warn(f"Skipping {source.name}: already rendered ({RENDER_COMPLETE_MARKER})")
+        return None
 
     output_name = args.output_name or source.name
-    suffix = f"360{args.stereo}"
-    output_dir = source / "rendered"
-    output_dir.mkdir(exist_ok=True)
-    output = output_dir / f"{output_name}_{suffix}.mp4"
+    output_dir = DEFAULT_OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n" + "=" * 55)
-    print(f"  VAM VR360 Renderer")
-    print("=" * 55)
     info(f"Source  : {source}")
-    info(f"Output  : {output}")
 
-    # Discover inputs
+    if not is_export_complete(source):
+        warn(f"Skipping {source.name}: export not complete (no WAV audio yet)")
+        return None
+
     frames, ext = find_frames(source)
     pattern = frame_pattern(frames, ext)
     audio = find_audio(source)
-    w, h = probe_resolution(frames[0])
+    src_w, src_h = probe_resolution(frames[0])
+    flat = args.flat or not is_vr_resolution(src_w, src_h)
 
-    info(f"Frames  : {len(frames)} x .{ext}  ({w}x{h})")
+    info(f"Frames  : {len(frames)} x .{ext}  ({src_w}x{src_h})")
+    if flat and not args.flat:
+        info("Mode    : flat (source below 6k — skipping VR metadata)")
+    elif flat:
+        info("Mode    : flat")
+    else:
+        info("Mode    : VR360")
 
     if args.framerate is not None:
         framerate = args.framerate
@@ -299,21 +376,25 @@ def main() -> None:
     elif audio:
         framerate = detect_framerate(len(frames), audio)
     else:
-        die("No audio file found — cannot auto-detect framerate. Pass -r explicitly.")
+        raise RenderError("No audio file found — cannot auto-detect framerate. Pass -r explicitly.")
 
-    if args.resolution:
-        info(f"Scale   : {args.resolution}")
+    suffix = output_suffix(flat, args.stereo, src_w, src_h, framerate)
+    output = output_dir / f"{output_name} {suffix}.mp4"
+    info(f"Output  : {output}")
+
+    if output.exists() and not args.force:
+        warn(f"Skipping {source.name}: output already exists (use --force to overwrite)")
+        return None
+
     if audio and args.audio_offset != 0:
         if args.audio_offset > 0:
             info(f"AV sync : audio leads video by {args.audio_offset:g}s")
         else:
             info(f"AV sync : video leads audio by {-args.audio_offset:g}s")
 
-    # Encode
-    import time
     t0 = time.perf_counter()
     encoder = encode(
-        pattern, audio, len(frames), framerate, args.resolution,
+        pattern, audio, len(frames), framerate,
         args.audio_offset if audio else 0.0, args.crf, args.cq, output,
     )
     elapsed = time.perf_counter() - t0
@@ -322,8 +403,103 @@ def main() -> None:
     size_mb = output.stat().st_size / 1_048_576
     ok(f"{encoder}  |  {enc_fps:.1f} encode-fps  |  {elapsed:.1f}s  |  {size_mb:.2f} MB")
 
-    # Metadata
-    inject_metadata(output, args.stereo)
+    if flat:
+        info("Metadata: skipped (flat)")
+    else:
+        if not shutil.which("exiftool"):
+            raise RenderError("'exiftool' not found on PATH. Please install it first.")
+        inject_metadata(output, args.stereo)
+
+    return output
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Assemble VAM frame sequence into a 360 VR video."
+    )
+    parser.add_argument("source", nargs="?", default=None,
+                        help="Folder with frame sequence and WAV "
+                             f"(default: render all pending folders in {DEFAULT_VR_RENDERS})")
+    parser.add_argument("-r", "--framerate", type=int, default=None,
+                        help="Output framerate (default: auto-detect from frames/audio)")
+    parser.add_argument("--crf", type=int, default=20, help="libx265 quality (0–51, lower=better)")
+    parser.add_argument("--cq",  type=int, default=20, help="hevc_nvenc quality (0–51, lower=better)")
+    parser.add_argument("--stereo", default="mono",
+                        choices=["mono", "left-right", "top-bottom"])
+    parser.add_argument("--output-name", help="Base name for output file (default: folder name)")
+    parser.add_argument(
+        "--audio-offset", type=float, default=-0.3,
+        help="Seconds audio leads video when muxing (negative = video leads; default: -0.3, use 0 to disable)",
+    )
+    parser.add_argument(
+        "--flat", action="store_true",
+        help="Force flat/non-VR output (skip 360 metadata even for 6k+ sources)",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite output and re-render folders marked complete",
+    )
+    args = parser.parse_args()
+
+    # Dependency checks
+    for tool in ("ffmpeg", "ffprobe"):
+        if not shutil.which(tool):
+            die(f"'{tool}' not found on PATH. Please install it first.")
+
+    print(f"\n" + "=" * 55)
+    print(f"  VAM VR360 Renderer")
+    print("=" * 55)
+
+    if args.source is None:
+        pending = find_pending_folders(force=args.force)
+        if not pending:
+            exit_notice(f"No pending render folders in {DEFAULT_VR_RENDERS}.")
+
+        info(f"Batch   : {len(pending)} folder(s) to render in {DEFAULT_VR_RENDERS}")
+        completed = 0
+        skipped = 0
+        failed = 0
+
+        for index, source in enumerate(pending, start=1):
+            print(f"\n{'-' * 55}")
+            step(f"Batch [{index}/{len(pending)}] {source.name}")
+            try:
+                output = render_one(source.resolve(), args)
+            except RenderError as exc:
+                failed += 1
+                warn(f"Failed [{index}/{len(pending)}] {source.name}: {exc}")
+                continue
+
+            if output is None:
+                skipped += 1
+                continue
+
+            write_render_complete(source, output)
+            completed += 1
+            ok(f"Done [{index}/{len(pending)}]: {output.name}")
+
+        print(f"\n{'=' * 55}")
+        print(f"  Batch complete: {completed} rendered, {skipped} skipped, {failed} failed")
+        print("=" * 55 + "\n")
+        if failed:
+            sys.exit(1)
+        return
+
+    source = Path(args.source).resolve()
+    if not source.is_dir():
+        die(f"Source folder not found: {source}")
+
+    try:
+        output = render_one(source, args)
+    except RenderError as exc:
+        die(str(exc))
+
+    if output is None:
+        exit_notice(f"Nothing rendered for: {source}")
+
+    write_render_complete(source, output)
 
     print("\n" + "=" * 55)
     print(f"  Done: {output}")
