@@ -63,6 +63,50 @@ render_vr360 .\my_render --resolution 3840x1920
 Both use quality-based rate control (CQ/CRF 20) per the VAM plugin's recommendation.
 A `format=yuv420p` filter is prepended to fix the RGB→YUV conversion issue that causes NVENC to stall on 8K PNG input.
 
+---
+
+## sync_movies_s3.py
+
+Watches `C:\Movies\` and `E:\Movies\` and uploads new or changed files to `s3://park.movies.archive/`, preserving relative paths.
+
+### Dependencies
+
+| Tool | Purpose | Install |
+|---|---|---|
+| [watchdog](https://pypi.org/project/watchdog/) | Filesystem events | `pip install watchdog` |
+| [AWS CLI](https://aws.amazon.com/cli/) | S3 upload | `winget install Amazon.AWSCLI` + `aws configure` |
+
+### Usage
+
+```bash
+# Start watcher (initial sync + watch)
+sync_movies_s3
+
+# Skip initial sync
+sync_movies_s3 --no-initial-sync
+
+# Preview without uploading
+sync_movies_s3 --dry-run
+
+# Custom stability window (default 60s)
+sync_movies_s3 --stable-secs 120
+```
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--no-initial-sync` | off | Skip `aws s3 sync` on startup |
+| `--stable-secs N` | `60` | Seconds of unchanged file size before upload |
+| `--dry-run` | off | Print commands without executing |
+
+### Upload guards
+
+1. **Temp extensions** — `.part`, `.crdownload`, `.!qb`, `.tmp`, `.download` are never uploaded
+2. **Stability check** — file must have the same size for `--stable-secs` consecutive seconds before upload triggers (prevents syncing active downloads or in-progress renders)
+
+---
+
 ### Spherical metadata
 
 Injects Google Spatial Media–compatible XMP tags recognized by YouTube, DeoVR, VirtualDesktop, Meta Quest, and most other 360 players:
