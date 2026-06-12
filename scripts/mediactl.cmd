@@ -1,2 +1,2 @@
 @echo off
-pythonw "%~dp0..\src\mediactl.py" %*
+start "" pythonw "%~dp0..\src\mediactl.py" %*

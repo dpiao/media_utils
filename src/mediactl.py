@@ -13,11 +13,25 @@ Usage:
 Auto-start: right-click tray → "Launch at startup" to toggle registry key.
 """
 
+import sys
+
+
+def _acquire_single_instance_mutex() -> None:
+    """Exit immediately if another mediactl process is already running."""
+    import ctypes
+    _MUTEX_NAME = "Global\\mediactl_singleton"
+    ctypes.windll.kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    _acquire_single_instance_mutex()
+
 import logging
 import os
 import queue
 import subprocess
-import sys
 import threading
 import time
 import tkinter as tk
@@ -99,6 +113,27 @@ def is_autostart_enabled() -> bool:
             return True
     except FileNotFoundError:
         return False
+
+
+def get_autostart_cmd() -> str | None:
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, APP_NAME)
+            return value
+    except FileNotFoundError:
+        return None
+
+
+def repair_autostart_if_needed() -> bool:
+    """If autostart is on but the registry path is stale, rewrite it. Returns True if repaired."""
+    if not is_autostart_enabled():
+        return False
+    stored = get_autostart_cmd()
+    if stored == AUTOSTART_CMD:
+        return False
+    _log.info("Autostart path outdated (%s) — updating to %s", stored, AUTOSTART_CMD)
+    set_autostart(True)
+    return True
 
 
 def set_autostart(enable: bool) -> None:
@@ -550,18 +585,8 @@ class TrayApp:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _acquire_single_instance_mutex() -> None:
-    """Exit immediately if another mediactl process is already running."""
-    import ctypes
-    _MUTEX_NAME = "Global\\mediactl_singleton"
-    ctypes.windll.kernel32.CreateMutexW(None, True, _MUTEX_NAME)
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        _log.warning("Another mediactl instance is already running — exiting.")
-        sys.exit(0)
-
-
 def main() -> None:
-    _acquire_single_instance_mutex()
+    repair_autostart_if_needed()
     TrayApp().run()
 
 

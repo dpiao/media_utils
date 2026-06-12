@@ -6,6 +6,20 @@ Personal scripts for video post-processing and media management.
 pip install -r requirements.txt
 ```
 
+One-time: add launchers to your PATH (run from repo root, or double-click `scripts\setup_path.cmd`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_path.ps1
+```
+
+Then you can run `mediactl`, `render_vr360`, and `sync_media_to_s3` from any terminal.
+
+Desktop shortcut (one-time):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1
+```
+
 ## Repository layout
 
 ```

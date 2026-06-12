@@ -285,6 +285,29 @@ def test_set_autostart_disable_missing_key_is_safe():
         sut.set_autostart(False)  # must not raise
 
 
+def test_repair_autostart_updates_stale_path():
+    with patch.object(sut, "is_autostart_enabled", return_value=True), \
+         patch.object(sut, "get_autostart_cmd", return_value=r'"pythonw" "C:\old\mediactl.py"'), \
+         patch.object(sut, "set_autostart") as mock_set:
+        assert sut.repair_autostart_if_needed() is True
+    mock_set.assert_called_once_with(True)
+
+
+def test_repair_autostart_noop_when_current():
+    with patch.object(sut, "is_autostart_enabled", return_value=True), \
+         patch.object(sut, "get_autostart_cmd", return_value=sut.AUTOSTART_CMD), \
+         patch.object(sut, "set_autostart") as mock_set:
+        assert sut.repair_autostart_if_needed() is False
+    mock_set.assert_not_called()
+
+
+def test_repair_autostart_noop_when_disabled():
+    with patch.object(sut, "is_autostart_enabled", return_value=False), \
+         patch.object(sut, "set_autostart") as mock_set:
+        assert sut.repair_autostart_if_needed() is False
+    mock_set.assert_not_called()
+
+
 # ── TrayApp._run_in_thread ────────────────────────────────────────────────────
 
 def test_run_in_thread_has_two_params():
