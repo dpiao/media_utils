@@ -13,6 +13,8 @@ Usage:
 Auto-start: right-click tray → "Launch at startup" to toggle registry key.
 """
 
+import logging
+import os
 import queue
 import subprocess
 import sys
@@ -20,18 +22,41 @@ import threading
 import time
 import tkinter as tk
 import winreg
-from io import StringIO
 from pathlib import Path
-from tkinter import font as tkfont
+from tkinter import font as tkfont  # noqa: F401
 from tkinter import scrolledtext, ttk
 
 import pystray
 from PIL import Image, ImageDraw
 
+# ── File logging (always on, so crashes are diagnosable) ──────────────────────
+
+LOG_FILE = Path(__file__).resolve().parent.parent / "mediactl.log"
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    encoding="utf-8",
+)
+logging.getLogger("PIL").setLevel(logging.WARNING)
+_log = logging.getLogger("mediactl")
+
+def _log_uncaught(exc_type, exc_value, exc_tb):
+    _log.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+sys.excepthook = _log_uncaught
+
 # ── Worker definitions ────────────────────────────────────────────────────────
 
 THIS_DIR = Path(__file__).resolve().parent
-PYTHON = sys.executable
+
+# Workers need python.exe (not pythonw.exe) so their stdout/stderr pipes work.
+# We hide the console via CREATE_NO_WINDOW instead.
+_exe = sys.executable
+PYTHON = _exe.replace("pythonw.exe", "python.exe") if _exe.lower().endswith("pythonw.exe") else _exe
 
 WORKERS: list[dict] = [
     {
@@ -111,16 +136,21 @@ class WorkerProcess:
             if self._proc and self._proc.poll() is None:
                 return
             self._stopped = False
+            _log.info("Starting worker: %s  cmd=%s", self.name, self._cmd)
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
             self._proc = subprocess.Popen(
                 self._cmd,
                 cwd=self._cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
                 bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW,
+                env=env,
             )
             self._log(f"[mediactl] started (pid {self._proc.pid})")
+            _log.info("Worker %s started (pid %d)", self.name, self._proc.pid)
             t = threading.Thread(target=self._read_loop, daemon=True)
             t.start()
 
@@ -130,6 +160,7 @@ class WorkerProcess:
             if self._proc and self._proc.poll() is None:
                 self._proc.terminate()
                 self._log("[mediactl] stopped")
+                _log.info("Worker %s stopped", self.name)
 
     def restart(self) -> None:
         self.stop()
@@ -154,12 +185,13 @@ class WorkerProcess:
                 line = raw.rstrip()
                 self._dispatch(line)
                 self._log(line)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("Worker %s read error: %s", self.name, exc)
         finally:
             proc.wait()
             if not self._stopped:
                 self._log(f"[mediactl] process exited (code {proc.returncode}) — restarting in 5s")
+                _log.warning("Worker %s exited (code %d), restarting in 5s", self.name, proc.returncode)
                 time.sleep(5)
                 self.start()
 
@@ -282,6 +314,7 @@ class TrayApp:
     # ── startup ─────────────────────────────────────────────────────────────
 
     def run(self) -> None:
+        _log.info("mediactl starting, log file: %s", LOG_FILE)
         for w in self._workers:
             w.start()
 
@@ -313,17 +346,25 @@ class TrayApp:
 
     def _on_icon_ready(self, icon: pystray.Icon) -> None:
         icon.visible = True
+        _log.info("Tray icon ready and visible")
 
     def _show_logs(self, icon=None, item=None) -> None:
         threading.Thread(target=self._log_window.show, daemon=True).start()
+
+    @staticmethod
+    def _run_in_thread(fn):
+        """Return a pystray-compatible action (icon, item) that runs fn in a thread."""
+        def _action(icon, item):
+            threading.Thread(target=fn, daemon=True).start()
+        return _action
 
     def _worker_submenu(self, w: WorkerProcess) -> pystray.MenuItem:
         return pystray.MenuItem(
             w.name,
             pystray.Menu(
-                pystray.MenuItem("Stop",    lambda i, it, ww=w: threading.Thread(target=ww.stop,    daemon=True).start()),
-                pystray.MenuItem("Start",   lambda i, it, ww=w: threading.Thread(target=ww.start,   daemon=True).start()),
-                pystray.MenuItem("Restart", lambda i, it, ww=w: threading.Thread(target=ww.restart, daemon=True).start()),
+                pystray.MenuItem("Stop",    self._run_in_thread(w.stop)),
+                pystray.MenuItem("Start",   self._run_in_thread(w.start)),
+                pystray.MenuItem("Restart", self._run_in_thread(w.restart)),
             ),
         )
 
@@ -331,6 +372,7 @@ class TrayApp:
         set_autostart(not is_autostart_enabled())
 
     def _quit(self, icon, item) -> None:
+        _log.info("Quit requested")
         for w in self._workers:
             w.stop()
         icon.stop()
@@ -344,17 +386,29 @@ class TrayApp:
         """Deliver notifications on a background thread to avoid blocking workers."""
         while True:
             title, body = self._notify_queue.get()
+            _log.info("NOTIFY %s | %s", title, body)
             if self._icon:
                 try:
-                    msg = f"{body}" if body else title
+                    msg = body if body else title
                     self._icon.notify(msg, title)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log.warning("Toast failed: %s", exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _acquire_single_instance_mutex() -> None:
+    """Exit immediately if another mediactl process is already running."""
+    import ctypes
+    _MUTEX_NAME = "Global\\mediactl_singleton"
+    ctypes.windll.kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        _log.warning("Another mediactl instance is already running — exiting.")
+        sys.exit(0)
+
+
 def main() -> None:
+    _acquire_single_instance_mutex()
     TrayApp().run()
 
 

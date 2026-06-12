@@ -2,42 +2,90 @@
 
 Personal scripts for video post-processing and media management.
 
-```
+```bash
 pip install -r requirements.txt
+```
+
+## Repository layout
+
+```
+src/        Python source files
+scripts/    Windows .cmd launchers (double-click or call from PATH)
+tests/      pytest test suite
 ```
 
 ---
 
-## mediactl.py — Background supervisor
+## mediactl — Background supervisor
 
-System-tray app that runs `render_vr360` and `sync_media_to_s3` persistently in the background, sends Windows toast notifications on key events, and provides a per-script log viewer.
+System-tray app that runs `render_vr360` and `sync_media_to_s3` persistently in the
+background, sends Windows toast notifications on key events, and provides a per-script
+log viewer.
 
-### Dependencies
+### Quick start
 
-| Package | Install |
-|---|---|
-| `pystray` | `pip install pystray` |
-| `Pillow` | `pip install Pillow` |
+Double-click `scripts/mediactl.cmd`, or run it from a terminal. The console window
+closes immediately — mediactl runs silently as a tray icon.
 
-### Usage
+### Verifying it started
 
-```bash
-mediactl          # starts tray app (no console window)
+Check `mediactl.log` in the repo root:
+
+```
+type mediactl.log
 ```
 
-Or double-click `mediactl.cmd`.
+Key lines to look for:
 
-### Features
+| Line | Meaning |
+|---|---|
+| `mediactl starting` | Process launched |
+| `Worker X started (pid …)` | Each worker is running |
+| `Tray icon ready and visible` | Tray icon appeared |
+| `NOTIFY … \| …` | A notification was dispatched |
 
-- **System tray icon** — right-click menu for all controls
-- **Toast notifications** — render started/complete/failed, S3 upload queued/complete, warnings
-- **Log window** — dark tabbed panel, one scrolling log per script, Restart buttons
-- **Auto-restart** — if a script crashes it restarts automatically after 5 s
-- **Launch at startup** — right-click tray → *Launch at startup* writes/removes a Windows registry Run key
+### Single-instance
 
-### Adding a new script
+Running `mediactl.cmd` a second time exits immediately — a Windows named mutex
+(`Global\mediactl_singleton`) ensures only one instance runs at a time.
 
-Add one entry to `WORKERS` in `mediactl.py`:
+### Tray icon
+
+Look for the icon in the system tray (bottom-right). If it is hidden, click the `^`
+arrow to reveal hidden icons.
+
+Right-click menu:
+
+| Item | Action |
+|---|---|
+| **Show logs** | Opens the tabbed log window |
+| **Render VR360 › Stop/Start/Restart** | Control that worker |
+| **S3 Sync › Stop/Start/Restart** | Control that worker |
+| **Launch at startup** | Toggle Windows autostart (see below) |
+| **Quit** | Stop all workers and exit |
+
+### Launch at startup
+
+*Right-click tray → Launch at startup* writes or removes a value under:
+
+```
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+```
+
+Value name: `mediactl`  
+Value: `"<path\to\pythonw.exe>" "<path\to\src\mediactl.py>"`
+
+Windows reads this key at every user login and runs the command automatically.
+The menu item shows a checkmark when the entry is present.
+
+### Auto-restart
+
+If a worker script exits unexpectedly (any non-zero code) it is restarted
+automatically after 5 seconds.
+
+### Adding a new background script
+
+Add one entry to `WORKERS` in `src/mediactl.py`:
 
 ```python
 {
@@ -50,13 +98,22 @@ Add one entry to `WORKERS` in `mediactl.py`:
 }
 ```
 
-Print `NOTIFY:title|body` anywhere in the script to trigger a toast.
+Print `NOTIFY:title|body` anywhere in the script to trigger a toast notification.
+
+### Dependencies
+
+| Package | Purpose |
+|---|---|
+| `pystray` | System tray icon |
+| `Pillow` | Icon rendering |
 
 ---
 
-## render_vr360.py — VAM frame sequence encoder
+## render_vr360 — VAM frame sequence encoder
 
-Assembles a [VAM Video Renderer](https://hub.virtamate.com/resources/video-renderer-for-3d-vr180-vr360-and-flat-2d-audio-bvh-animation-recorder.11994/) frame sequence (PNG or JPG + WAV) into an MP4. Injects 360 spherical metadata for VR outputs. Runs as a watch loop by default.
+Assembles a [VAM Video Renderer](https://hub.virtamate.com/resources/video-renderer-for-3d-vr180-vr360-and-flat-2d-audio-bvh-animation-recorder.11994/)
+frame sequence (PNG or JPG + WAV) into an MP4. Injects 360 spherical metadata for VR
+outputs. Runs as a watch loop by default — mediactl starts it automatically.
 
 ### Dependencies
 
@@ -69,17 +126,17 @@ Assembles a [VAM Video Renderer](https://hub.virtamate.com/resources/video-rende
 ### Usage
 
 ```bash
-# Watch loop (default) — polls every 10s, renders all pending folders automatically
-render_vr360
+# Watch loop (default) — polls every 10 s, renders all pending folders automatically
+scripts\render_vr360.cmd
 
 # Render all pending folders once and exit
-render_vr360 --once
+scripts\render_vr360.cmd --once
 
 # Render a specific folder
-render_vr360 "C:\Games\Vam\Saves\VR_Renders\20260607-002259"
+scripts\render_vr360.cmd "C:\Games\Vam\Saves\VR_Renders\20260607-002259"
 
 # Re-render already-completed folders
-render_vr360 --force
+scripts\render_vr360.cmd --force
 ```
 
 ### Options
@@ -87,13 +144,13 @@ render_vr360 --force
 | Flag | Default | Description |
 |---|---|---|
 | `source` | auto | Folder to render; default scans `C:\Games\Vam\Saves\VR_Renders` for pending folders |
-| `-r`, `--framerate` | auto | Output fps; auto-detected from frame count / audio duration (must be ~30 or ~60) |
+| `-r`, `--framerate` | auto | Output fps; auto-detected from frame count / audio duration |
 | `--crf` | `20` | libx265 quality (0–51, lower = better) |
 | `--cq` | `20` | hevc_nvenc quality (0–51, lower = better) |
 | `--stereo` | `mono` | `mono`, `left-right`, or `top-bottom` |
 | `--output-name` | folder name | Base name for output file |
 | `--audio-offset` | `-0.3` | AV sync offset in seconds (negative = video leads audio) |
-| `--flat` | off | Force flat output even on 6k+ sources (skip VR metadata) |
+| `--flat` | off | Force flat output (skip VR metadata) |
 | `--force` | off | Overwrite existing output and ignore completion markers |
 | `--once` | off | Render pending folders once and exit instead of watching |
 | `--interval` | `10` | Watch poll interval in seconds |
@@ -104,37 +161,30 @@ render_vr360 --force
 
 Examples:
 - `20260608-014702 360mono 6k 60fps.mp4` — VR360, source ≥ 6k
-- `20260608-014702 4k 30fps.mp4` — flat, source < 6k (auto-detected)
+- `20260608-014702 flat 4k 30fps.mp4` — flat, source < 6k (auto-detected)
 
 ### Auto-flat
 
-Sources below 6k (`max(width, height) < 5760`) are automatically rendered without VR metadata. Use `--flat` to force flat on any resolution.
+Sources below 6k (`max(width, height) < 5760`) are automatically rendered without VR
+metadata. Use `--flat` to force flat on any resolution.
 
 ### Completion markers
 
-On success, `_RENDER_COMPLETE_.txt` is written into the source folder containing the output path and file size. This prevents re-rendering on the next watch cycle. Delete the marker or use `--force` to re-render.
+On success, `_RENDER_COMPLETE_.txt` is written into the source folder containing the
+output path and file size. This prevents re-rendering on the next watch cycle. Delete
+the marker or use `--force` to re-render.
 
 ### Encoder strategy
 
 1. **hevc_nvenc** (NVIDIA GPU) — tried first, ~50% faster
 2. **libx265** (CPU) — automatic fallback
 
-### Spherical metadata
-
-Injects Google Spatial Media–compatible XMP tags for VR outputs:
-
-```
-ProjectionType = equirectangular
-Spherical      = true
-Stitched       = true
-StereoMode     = mono
-```
-
 ---
 
-## sync_media_to_s3.py — S3 media sync
+## sync_media_to_s3 — S3 media sync
 
-Watches local movie folders and uploads new or changed files to S3, preserving relative paths. Configured for `C:\Movies\` and `E:\Movies\` → `s3://park.movies.archive/`.
+Watches local movie folders and uploads new or changed files to S3, preserving relative
+paths. Configured for `C:\Movies\` and `E:\Movies\` → `s3://park.movies.archive/`.
 
 ### Dependencies
 
@@ -147,16 +197,13 @@ Watches local movie folders and uploads new or changed files to S3, preserving r
 
 ```bash
 # Start watcher (initial sync + watch)
-sync_media_to_s3
+scripts\sync_media_to_s3.cmd
 
 # Skip initial sync
-sync_media_to_s3 --no-initial-sync
+scripts\sync_media_to_s3.cmd --no-initial-sync
 
 # Preview without uploading
-sync_media_to_s3 --dry-run
-
-# Custom stability window (default 60s)
-sync_media_to_s3 --stable-secs 120
+scripts\sync_media_to_s3.cmd --dry-run
 ```
 
 ### Options
@@ -170,5 +217,5 @@ sync_media_to_s3 --stable-secs 120
 ### Upload guards
 
 1. **Temp extensions** — `.part`, `.crdownload`, `.!qb`, `.tmp`, `.download` are never uploaded
-2. **Stability check** — file must have the same size for `--stable-secs` seconds before upload (prevents syncing active renders or downloads)
-3. **Ignore file** — patterns in [`sync_media_to_s3.ignore`](sync_media_to_s3.ignore) skip matching paths (glob `*`/`?`, or `re:` prefix for regex)
+2. **Stability check** — file must have the same size for `--stable-secs` seconds before upload
+3. **Ignore file** — patterns in `src/sync_media_to_s3.ignore` skip matching paths (glob `*`/`?`, or `re:` prefix for regex)

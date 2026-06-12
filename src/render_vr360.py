@@ -460,7 +460,11 @@ SPINNER = "|/-\\"
 
 
 def wait_with_spinner(seconds: float, label: str) -> None:
-    """Wait with a single-line spinner (overwrites itself, no log spam)."""
+    """Wait for `seconds`. Shows a spinner when stdout is a TTY; sleeps silently
+    when piped (e.g. captured by mediactl) to avoid flooding the log window."""
+    if not sys.stdout.isatty():
+        time.sleep(seconds)
+        return
     end = time.perf_counter() + seconds
     i = 0
     try:
