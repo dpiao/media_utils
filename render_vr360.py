@@ -41,6 +41,8 @@ def die(msg: str) -> None:
 DEFAULT_VR_RENDERS = Path(r"C:\Games\Vam\Saves\VR_Renders")
 DEFAULT_OUTPUT_DIR = Path(r"C:\Movies\V Vam My Render")
 RENDER_COMPLETE_MARKER = "_RENDER_COMPLETE_.txt"
+DEFAULT_WATCH_INTERVAL = 10
+SPINNER_TICK_SEC = 0.3  # spinner frame interval (3x slower than 0.1s)
 
 
 class RenderError(Exception):
@@ -413,6 +415,80 @@ def render_one(source: Path, args: argparse.Namespace) -> Path | None:
     return output
 
 
+def run_batch(args: argparse.Namespace, pending: list[Path] | None = None) -> tuple[int, int, int]:
+    """Render all pending folders. Returns (completed, skipped, failed)."""
+    if pending is None:
+        pending = find_pending_folders(force=args.force)
+    if not pending:
+        return 0, 0, 0
+
+    info(f"Batch   : {len(pending)} folder(s) to render in {DEFAULT_VR_RENDERS}")
+    completed = 0
+    skipped = 0
+    failed = 0
+
+    for index, source in enumerate(pending, start=1):
+        print(f"\n{'-' * 55}")
+        step(f"Batch [{index}/{len(pending)}] {source.name}")
+        try:
+            output = render_one(source.resolve(), args)
+        except RenderError as exc:
+            failed += 1
+            warn(f"Failed [{index}/{len(pending)}] {source.name}: {exc}")
+            continue
+
+        if output is None:
+            skipped += 1
+            continue
+
+        write_render_complete(source, output)
+        completed += 1
+        ok(f"Done [{index}/{len(pending)}]: {output.name}")
+
+    if completed or skipped or failed:
+        print(f"\n{'=' * 55}")
+        print(f"  Batch complete: {completed} rendered, {skipped} skipped, {failed} failed")
+        print("=" * 55)
+
+    return completed, skipped, failed
+
+
+SPINNER = "|/-\\"
+
+
+def wait_with_spinner(seconds: float, label: str) -> None:
+    """Wait with a single-line spinner (overwrites itself, no log spam)."""
+    end = time.perf_counter() + seconds
+    i = 0
+    try:
+        while True:
+            remaining = end - time.perf_counter()
+            if remaining <= 0:
+                break
+            ch = SPINNER[i % len(SPINNER)]
+            print(f"\r  {ch} {label}   ", end="", flush=True)
+            i += 1
+            time.sleep(min(SPINNER_TICK_SEC, remaining))
+    finally:
+        print("\r" + " " * 50 + "\r", end="", flush=True)
+
+
+def watch_and_render(args: argparse.Namespace) -> None:
+    """Poll VR_Renders for pending folders and render them."""
+    info(f"Watching {DEFAULT_VR_RENDERS} every {args.interval}s (Ctrl+C to stop)")
+    try:
+        while True:
+            pending = find_pending_folders(force=args.force)
+            if not pending:
+                wait_with_spinner(args.interval, "Watching for new renders")
+                continue
+
+            run_batch(args, pending)
+            wait_with_spinner(args.interval, "Watching for new renders")
+    except KeyboardInterrupt:
+        print("\nWatch stopped.\n")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -421,7 +497,7 @@ def main() -> None:
     )
     parser.add_argument("source", nargs="?", default=None,
                         help="Folder with frame sequence and WAV "
-                             f"(default: render all pending folders in {DEFAULT_VR_RENDERS})")
+                             f"(default: watch {DEFAULT_VR_RENDERS} for pending renders)")
     parser.add_argument("-r", "--framerate", type=int, default=None,
                         help="Output framerate (default: auto-detect from frames/audio)")
     parser.add_argument("--crf", type=int, default=20, help="libx265 quality (0–51, lower=better)")
@@ -441,7 +517,18 @@ def main() -> None:
         "--force", action="store_true",
         help="Overwrite output and re-render folders marked complete",
     )
+    parser.add_argument(
+        "--once", action="store_true",
+        help="Render pending folders once and exit (default: watch every 10s)",
+    )
+    parser.add_argument(
+        "--interval", type=int, default=DEFAULT_WATCH_INTERVAL,
+        help=f"Watch poll interval in seconds (default: {DEFAULT_WATCH_INTERVAL})",
+    )
     args = parser.parse_args()
+
+    if args.interval <= 0:
+        die("--interval must be a positive number of seconds")
 
     # Dependency checks
     for tool in ("ffmpeg", "ffprobe"):
@@ -453,38 +540,15 @@ def main() -> None:
     print("=" * 55)
 
     if args.source is None:
-        pending = find_pending_folders(force=args.force)
-        if not pending:
-            exit_notice(f"No pending render folders in {DEFAULT_VR_RENDERS}.")
-
-        info(f"Batch   : {len(pending)} folder(s) to render in {DEFAULT_VR_RENDERS}")
-        completed = 0
-        skipped = 0
-        failed = 0
-
-        for index, source in enumerate(pending, start=1):
-            print(f"\n{'-' * 55}")
-            step(f"Batch [{index}/{len(pending)}] {source.name}")
-            try:
-                output = render_one(source.resolve(), args)
-            except RenderError as exc:
-                failed += 1
-                warn(f"Failed [{index}/{len(pending)}] {source.name}: {exc}")
-                continue
-
-            if output is None:
-                skipped += 1
-                continue
-
-            write_render_complete(source, output)
-            completed += 1
-            ok(f"Done [{index}/{len(pending)}]: {output.name}")
-
-        print(f"\n{'=' * 55}")
-        print(f"  Batch complete: {completed} rendered, {skipped} skipped, {failed} failed")
-        print("=" * 55 + "\n")
-        if failed:
-            sys.exit(1)
+        if args.once:
+            completed, skipped, failed = run_batch(args)
+            if completed == 0 and skipped == 0 and failed == 0:
+                exit_notice(f"No pending render folders in {DEFAULT_VR_RENDERS}.")
+            print()
+            if failed:
+                sys.exit(1)
+            return
+        watch_and_render(args)
         return
 
     source = Path(args.source).resolve()

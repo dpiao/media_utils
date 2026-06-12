@@ -65,9 +65,9 @@ A `format=yuv420p` filter is prepended to fix the RGB→YUV conversion issue tha
 
 ---
 
-## sync_movies_s3.py
+## sync_media_to_s3.py
 
-Watches `C:\Movies\` and `E:\Movies\` and uploads new or changed files to `s3://park.movies.archive/`, preserving relative paths.
+Watches local folders and uploads new or changed files to S3, preserving relative paths. Currently configured for `C:\Movies\` and `E:\Movies\` → `s3://park.movies.archive/`.
 
 ### Dependencies
 
@@ -80,16 +80,16 @@ Watches `C:\Movies\` and `E:\Movies\` and uploads new or changed files to `s3://
 
 ```bash
 # Start watcher (initial sync + watch)
-sync_movies_s3
+sync_media_to_s3
 
 # Skip initial sync
-sync_movies_s3 --no-initial-sync
+sync_media_to_s3 --no-initial-sync
 
 # Preview without uploading
-sync_movies_s3 --dry-run
+sync_media_to_s3 --dry-run
 
 # Custom stability window (default 60s)
-sync_movies_s3 --stable-secs 120
+sync_media_to_s3 --stable-secs 120
 ```
 
 ### Options
@@ -104,6 +104,7 @@ sync_movies_s3 --stable-secs 120
 
 1. **Temp extensions** — `.part`, `.crdownload`, `.!qb`, `.tmp`, `.download` are never uploaded
 2. **Stability check** — file must have the same size for `--stable-secs` consecutive seconds before upload triggers (prevents syncing active downloads or in-progress renders)
+3. **Ignore file** — patterns in [`sync_media_to_s3.ignore`](sync_media_to_s3.ignore) skip matching paths during sync and upload (glob `*`/`?`, or `re:` for regex)
 
 ---
 
