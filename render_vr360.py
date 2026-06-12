@@ -430,11 +430,13 @@ def run_batch(args: argparse.Namespace, pending: list[Path] | None = None) -> tu
     for index, source in enumerate(pending, start=1):
         print(f"\n{'-' * 55}")
         step(f"Batch [{index}/{len(pending)}] {source.name}")
+        print(f"NOTIFY:Render started|{source.name}", flush=True)
         try:
             output = render_one(source.resolve(), args)
         except RenderError as exc:
             failed += 1
             warn(f"Failed [{index}/{len(pending)}] {source.name}: {exc}")
+            print(f"NOTIFY:Render failed|{source.name}: {exc}", flush=True)
             continue
 
         if output is None:
@@ -444,6 +446,7 @@ def run_batch(args: argparse.Namespace, pending: list[Path] | None = None) -> tu
         write_render_complete(source, output)
         completed += 1
         ok(f"Done [{index}/{len(pending)}]: {output.name}")
+        print(f"NOTIFY:Render complete|{output.name}", flush=True)
 
     if completed or skipped or failed:
         print(f"\n{'=' * 55}")

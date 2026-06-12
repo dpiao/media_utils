@@ -143,6 +143,7 @@ def ok(msg: str) -> None:
 
 def warn(msg: str) -> None:
     print(f"[{_ts()}]  [!] {msg}", file=sys.stderr)
+    print(f"NOTIFY:Warning|{msg}", flush=True)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -218,6 +219,7 @@ class StabilityChecker:
                 return
             self._pending[file_path] = (local_root, s3_prefix, size, time.monotonic())
         info(f"queued  {file_path}  ({size:,} B) — waiting {self._stable_secs}s stability")
+        print(f"NOTIFY:Upload pending|{file_path.name}", flush=True)
 
     def _loop(self) -> None:
         while True:
@@ -242,6 +244,7 @@ class StabilityChecker:
             for path, root, prefix in ready:
                 info(f"stable  {path}")
                 upload_file(root, path, prefix, self._dry_run, self._ignore)
+                print(f"NOTIFY:Uploaded to S3|{path.name}", flush=True)
 
 
 def file_fingerprint(path: Path) -> tuple[int, float] | None:
