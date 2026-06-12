@@ -31,7 +31,9 @@ from PIL import Image, ImageDraw
 
 # ── File logging (always on, so crashes are diagnosable) ──────────────────────
 
-LOG_FILE = Path(__file__).resolve().parent.parent / "mediactl.log"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LOG_FILE  = REPO_ROOT / "mediactl.log"
+LOGS_DIR  = REPO_ROOT / "logs"
 
 logging.basicConfig(
     filename=LOG_FILE,
@@ -128,6 +130,11 @@ class WorkerProcess:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._stopped = False
+        # Per-worker log file: logs/<slug>.log
+        LOGS_DIR.mkdir(exist_ok=True)
+        slug = self.name.lower().replace(" ", "_")
+        self._log_path = LOGS_DIR / f"{slug}.log"
+        self._log_fh: "None | object" = None  # opened lazily on first write
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -174,8 +181,20 @@ class WorkerProcess:
 
     # ── internals ───────────────────────────────────────────────────────────
 
+    @property
+    def log_path(self) -> Path:
+        return self._log_path
+
     def _log(self, line: str) -> None:
         self._log_queue.put((self.name, line))
+        # Also append to the per-worker log file
+        try:
+            if self._log_fh is None:
+                self._log_fh = open(self._log_path, "a", encoding="utf-8", buffering=1)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._log_fh.write(f"{ts}  {line}\n")  # type: ignore[union-attr]
+        except Exception:
+            pass
 
     def _read_loop(self) -> None:
         proc = self._proc
@@ -321,7 +340,7 @@ class TrayApp:
         threading.Thread(target=self._notify_loop, daemon=True).start()
 
         menu = pystray.Menu(
-            pystray.MenuItem("Show logs", self._show_logs),
+            pystray.MenuItem("Show logs", self._show_logs, default=True),
             pystray.Menu.SEPARATOR,
             *[self._worker_submenu(w) for w in self._workers],
             pystray.Menu.SEPARATOR,
