@@ -4,7 +4,7 @@ mediactl.py — System-tray supervisor for background media scripts.
 
 Manages render_vr360.py and sync_media_to_s3.py as persistent subprocesses,
 parses NOTIFY: lines from their stdout for Windows toast notifications, and
-shows a per-worker log window via Tkinter.
+shows a status dashboard via Tkinter (left-click tray icon).
 
 Usage:
     pythonw mediactl.py          (silent background, tray icon only)
@@ -23,8 +23,8 @@ import time
 import tkinter as tk
 import winreg
 from pathlib import Path
-from tkinter import font as tkfont  # noqa: F401
-from tkinter import scrolledtext, ttk
+from tkinter import font as tkfont
+from tkinter import scrolledtext
 
 import pystray
 from PIL import Image, ImageDraw
@@ -130,6 +130,7 @@ class WorkerProcess:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._stopped = False
+        self._start_time: float | None = None
         # Per-worker log file: logs/<slug>.log
         LOGS_DIR.mkdir(exist_ok=True)
         slug = self.name.lower().replace(" ", "_")
@@ -156,6 +157,7 @@ class WorkerProcess:
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 env=env,
             )
+            self._start_time = time.monotonic()
             self._log(f"[mediactl] started (pid {self._proc.pid})")
             _log.info("Worker %s started (pid %d)", self.name, self._proc.pid)
             t = threading.Thread(target=self._read_loop, daemon=True)
@@ -168,6 +170,7 @@ class WorkerProcess:
                 self._proc.terminate()
                 self._log("[mediactl] stopped")
                 _log.info("Worker %s stopped", self.name)
+            self._start_time = None
 
     def restart(self) -> None:
         self.stop()
@@ -178,6 +181,22 @@ class WorkerProcess:
     def running(self) -> bool:
         with self._lock:
             return bool(self._proc and self._proc.poll() is None)
+
+    @property
+    def pid(self) -> int | None:
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                return self._proc.pid
+            return None
+
+    @property
+    def uptime(self) -> str:
+        with self._lock:
+            running = bool(self._proc and self._proc.poll() is None)
+            if not running or self._start_time is None:
+                return "—"
+            elapsed = int(time.monotonic() - self._start_time)
+        return f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}"
 
     # ── internals ───────────────────────────────────────────────────────────
 
@@ -225,17 +244,35 @@ class WorkerProcess:
                 return
 
 
-# ── Log window (Tkinter) ──────────────────────────────────────────────────────
+# ── Status window (Tkinter) ───────────────────────────────────────────────────
 
-class LogWindow:
-    MAX_LINES = 2000
+_BG = "#1e1e1e"
+_FG = "#d4d4d4"
+_BTN_BG = "#3c3c3c"
+_GREEN = "#4caf50"
+_RED = "#f44336"
 
-    def __init__(self, workers: list[WorkerProcess], log_queue: "queue.Queue[tuple[str,str]]") -> None:
+
+class StatusWindow:
+    MAX_LINES = 500
+
+    def __init__(
+        self,
+        workers: list[WorkerProcess],
+        log_queue: "queue.Queue[tuple[str,str]]",
+        on_quit,
+        on_autostart_toggle,
+    ) -> None:
         self._workers = workers
         self._log_queue = log_queue
+        self._on_quit = on_quit
+        self._on_autostart_toggle = on_autostart_toggle
         self._root: tk.Tk | None = None
-        self._widgets: dict[str, scrolledtext.ScrolledText] = {}
+        self._log_widgets: dict[str, scrolledtext.ScrolledText] = {}
         self._line_counts: dict[str, int] = {}
+        self._status_labels: dict[str, tk.Label] = {}
+        self._dot_labels: dict[str, tk.Label] = {}
+        self._autostart_var: tk.BooleanVar | None = None
 
     def show(self) -> None:
         if self._root and self._root.winfo_exists():
@@ -247,45 +284,118 @@ class LogWindow:
     def _build(self) -> None:
         root = tk.Tk()
         self._root = root
-        root.title("mediactl — logs")
-        root.geometry("900x550")
-        root.configure(bg="#1e1e1e")
+        root.title("mediactl")
+        root.geometry("920x640")
+        root.configure(bg=_BG)
         root.protocol("WM_DELETE_WINDOW", root.withdraw)
 
-        notebook = ttk.Notebook(root)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
         mono = tkfont.Font(family="Consolas", size=9)
+        body = tkfont.Font(size=10)
+
+        main = tk.Frame(root, bg=_BG)
+        main.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         for worker in self._workers:
-            frame = ttk.Frame(notebook)
-            notebook.add(frame, text=worker.name)
+            self._build_worker_section(main, worker, mono, body)
 
-            txt = scrolledtext.ScrolledText(
-                frame,
-                font=mono,
-                bg="#1e1e1e",
-                fg="#d4d4d4",
-                insertbackground="#d4d4d4",
-                state=tk.DISABLED,
-                wrap=tk.NONE,
-            )
-            txt.pack(fill=tk.BOTH, expand=True)
-            self._widgets[worker.name] = txt
-            self._line_counts[worker.name] = 0
+        footer = tk.Frame(root, bg=_BG)
+        footer.pack(fill=tk.X, padx=8, pady=(0, 8))
 
-        btn_frame = tk.Frame(root, bg="#1e1e1e")
-        btn_frame.pack(fill=tk.X, padx=4, pady=2)
-        for worker in self._workers:
-            w = worker
-            tk.Button(
-                btn_frame, text=f"Restart {w.name}",
-                command=lambda ww=w: threading.Thread(target=ww.restart, daemon=True).start(),
-                bg="#3c3c3c", fg="#d4d4d4", relief=tk.FLAT, padx=8,
-            ).pack(side=tk.LEFT, padx=4)
+        self._autostart_var = tk.BooleanVar(value=is_autostart_enabled())
+        tk.Checkbutton(
+            footer,
+            text="Launch at startup",
+            variable=self._autostart_var,
+            command=self._toggle_autostart,
+            bg=_BG,
+            fg=_FG,
+            selectcolor=_BTN_BG,
+            activebackground=_BG,
+            activeforeground=_FG,
+            font=body,
+        ).pack(side=tk.LEFT)
+
+        tk.Button(
+            footer,
+            text="Quit",
+            command=self._on_quit,
+            bg=_BTN_BG,
+            fg=_FG,
+            relief=tk.FLAT,
+            padx=12,
+            font=body,
+        ).pack(side=tk.RIGHT)
 
         self._poll()
         root.mainloop()
+
+    def _build_worker_section(
+        self,
+        parent: tk.Frame,
+        worker: WorkerProcess,
+        mono: tkfont.Font,
+        body: tkfont.Font,
+    ) -> None:
+        section = tk.Frame(parent, bg=_BG)
+        section.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        header = tk.Frame(section, bg=_BG)
+        header.pack(fill=tk.X)
+
+        dot = tk.Label(header, text="●", font=body, bg=_BG, fg=_RED)
+        dot.pack(side=tk.LEFT, padx=(0, 6))
+        self._dot_labels[worker.name] = dot
+
+        tk.Label(
+            header,
+            text=worker.name,
+            font=body,
+            bg=_BG,
+            fg=_FG,
+            anchor=tk.W,
+        ).pack(side=tk.LEFT)
+
+        status = tk.Label(header, text="", font=body, bg=_BG, fg=_FG, anchor=tk.W)
+        status.pack(side=tk.LEFT, padx=(12, 0))
+        self._status_labels[worker.name] = status
+
+        btn_row = tk.Frame(section, bg=_BG)
+        btn_row.pack(fill=tk.X, pady=(4, 4))
+        for label, fn in (
+            ("Start", worker.start),
+            ("Stop", worker.stop),
+            ("Restart", worker.restart),
+        ):
+            tk.Button(
+                btn_row,
+                text=label,
+                command=lambda f=fn: threading.Thread(target=f, daemon=True).start(),
+                bg=_BTN_BG,
+                fg=_FG,
+                relief=tk.FLAT,
+                padx=8,
+                font=body,
+            ).pack(side=tk.LEFT, padx=(0, 4))
+
+        txt = scrolledtext.ScrolledText(
+            section,
+            height=8,
+            font=mono,
+            bg=_BG,
+            fg=_FG,
+            insertbackground=_FG,
+            state=tk.DISABLED,
+            wrap=tk.NONE,
+        )
+        txt.pack(fill=tk.BOTH, expand=True)
+        self._log_widgets[worker.name] = txt
+        self._line_counts[worker.name] = 0
+
+    def _toggle_autostart(self) -> None:
+        enabled = bool(self._autostart_var and self._autostart_var.get())
+        set_autostart(enabled)
+        if self._on_autostart_toggle:
+            self._on_autostart_toggle(enabled)
 
     def _poll(self) -> None:
         if not self._root:
@@ -296,18 +406,33 @@ class LogWindow:
                 self._append(name, line)
         except queue.Empty:
             pass
-        self._root.after(200, self._poll)
+        self._refresh_status()
+        self._root.after(500, self._poll)
+
+    def _refresh_status(self) -> None:
+        for worker in self._workers:
+            dot = self._dot_labels.get(worker.name)
+            label = self._status_labels.get(worker.name)
+            if not dot or not label:
+                continue
+            if worker.running:
+                dot.configure(fg=_GREEN)
+                pid = worker.pid or "?"
+                label.configure(text=f"running  pid {pid}  uptime {worker.uptime}")
+            else:
+                dot.configure(fg=_RED)
+                label.configure(text="stopped")
 
     def _append(self, name: str, line: str) -> None:
-        txt = self._widgets.get(name)
+        txt = self._log_widgets.get(name)
         if not txt:
             return
         txt.configure(state=tk.NORMAL)
         txt.insert(tk.END, line + "\n")
         self._line_counts[name] = self._line_counts.get(name, 0) + 1
         if self._line_counts[name] > self.MAX_LINES:
-            txt.delete("1.0", "500.0")
-            self._line_counts[name] = max(0, self._line_counts[name] - 500)
+            txt.delete("1.0", "100.0")
+            self._line_counts[name] = max(0, self._line_counts[name] - 100)
         txt.see(tk.END)
         txt.configure(state=tk.DISABLED)
 
@@ -326,9 +451,14 @@ class TrayApp:
     def __init__(self) -> None:
         self._log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._workers = [WorkerProcess(cfg, self._log_queue, self._on_notify) for cfg in WORKERS]
-        self._log_window = LogWindow(self._workers, self._log_queue)
         self._icon: pystray.Icon | None = None
         self._notify_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._status_window = StatusWindow(
+            self._workers,
+            self._log_queue,
+            on_quit=self._quit_from_gui,
+            on_autostart_toggle=lambda _: None,
+        )
 
     # ── startup ─────────────────────────────────────────────────────────────
 
@@ -340,7 +470,7 @@ class TrayApp:
         threading.Thread(target=self._notify_loop, daemon=True).start()
 
         menu = pystray.Menu(
-            pystray.MenuItem("Show logs", self._show_logs, default=True),
+            pystray.MenuItem("Show status", self._show_status, default=True),
             pystray.Menu.SEPARATOR,
             *[self._worker_submenu(w) for w in self._workers],
             pystray.Menu.SEPARATOR,
@@ -367,8 +497,12 @@ class TrayApp:
         icon.visible = True
         _log.info("Tray icon ready and visible")
 
-    def _show_logs(self, icon=None, item=None) -> None:
-        threading.Thread(target=self._log_window.show, daemon=True).start()
+    def _show_status(self, icon=None, item=None) -> None:
+        threading.Thread(target=self._status_window.show, daemon=True).start()
+
+    def _quit_from_gui(self) -> None:
+        if self._icon:
+            self._quit(self._icon, None)
 
     @staticmethod
     def _run_in_thread(fn):

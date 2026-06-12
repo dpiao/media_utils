@@ -20,12 +20,14 @@ tests/      pytest test suite
 
 System-tray app that runs `render_vr360` and `sync_media_to_s3` persistently in the
 background, sends Windows toast notifications on key events, and provides a per-script
-log viewer.
+log viewer and status dashboard.
 
 ### Quick start
 
 Double-click `scripts/mediactl.cmd`, or run it from a terminal. The console window
 closes immediately — mediactl runs silently as a tray icon.
+
+**Left-click** the tray icon to open the status dashboard. **Right-click** for the full menu.
 
 ### Verifying it started
 
@@ -33,6 +35,13 @@ Check `mediactl.log` in the repo root:
 
 ```
 type mediactl.log
+```
+
+Per-worker stdout is also written to `logs/`:
+
+```
+logs/render_vr360.log
+logs/s3_sync.log
 ```
 
 Key lines to look for:
@@ -58,11 +67,20 @@ Right-click menu:
 
 | Item | Action |
 |---|---|
-| **Show logs** | Opens the tabbed log window |
+| **Show status** | Opens the status dashboard (same as left-click) |
 | **Render VR360 › Stop/Start/Restart** | Control that worker |
 | **S3 Sync › Stop/Start/Restart** | Control that worker |
 | **Launch at startup** | Toggle Windows autostart (see below) |
 | **Quit** | Stop all workers and exit |
+
+### Status dashboard
+
+Left-click the tray icon (or *Show status* in the menu) to open a window with:
+
+- Per-worker status (running/stopped, pid, uptime)
+- Start / Stop / Restart buttons per worker
+- Live log tail per worker
+- Launch at startup checkbox and Quit button
 
 ### Launch at startup
 

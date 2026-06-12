@@ -112,6 +112,7 @@ def test_worker_start_sets_running():
     with patch("subprocess.Popen", return_value=fake_proc):
         w.start()
     assert w.running
+    assert w.pid == 99999
 
 
 def test_worker_start_idempotent():
@@ -135,12 +136,54 @@ def test_worker_stop_sets_not_running():
     fake_proc.terminate.side_effect = _terminate
     w.stop()
     assert not w.running
+    assert w.uptime == "—"
     fake_proc.terminate.assert_called_once()
 
 
 def test_worker_stop_without_start_is_safe():
     w = _make_worker()
     w.stop()  # should not raise
+
+
+# ── WorkerProcess pid / uptime ────────────────────────────────────────────────
+
+def test_pid_none_before_start():
+    w = _make_worker()
+    assert w.pid is None
+
+
+def test_pid_set_after_start():
+    w = _make_worker()
+    fake_proc = _fake_popen([])
+    with patch("subprocess.Popen", return_value=fake_proc):
+        w.start()
+    assert w.pid == 99999
+
+
+def test_uptime_not_running():
+    w = _make_worker()
+    assert w.uptime == "—"
+
+
+def test_uptime_running():
+    w = _make_worker()
+    fake_proc = _fake_popen([])
+    with patch("subprocess.Popen", return_value=fake_proc):
+        w.start()
+    w._start_time = time.monotonic() - 90
+    assert w.uptime == "00:01:30"
+
+
+def test_uptime_cleared_on_stop():
+    w = _make_worker()
+    fake_proc = _fake_popen([])
+    with patch("subprocess.Popen", return_value=fake_proc):
+        w.start()
+    def _terminate():
+        fake_proc.poll.return_value = 1
+    fake_proc.terminate.side_effect = _terminate
+    w.stop()
+    assert w.uptime == "—"
 
 
 # ── WorkerProcess._read_loop — output routing and NOTIFY dispatch ─────────────
@@ -280,3 +323,43 @@ def test_single_instance_continues_when_mutex_free():
     with patch.object(ctypes.windll.kernel32, "CreateMutexW"), \
          patch.object(ctypes.windll.kernel32, "GetLastError", return_value=0):
         sut._acquire_single_instance_mutex()  # must not raise or exit
+
+
+# ── StatusWindow ──────────────────────────────────────────────────────────────
+
+def _mock_tk_root():
+    root = MagicMock()
+    root.winfo_exists.return_value = True
+    root.after = MagicMock()
+    root.mainloop = MagicMock()
+    return root
+
+
+def test_status_window_builds_without_display():
+    workers = [_make_worker(), _make_worker()]
+    workers[1].name = "Other"
+    log_q = queue.Queue()
+    win = sut.StatusWindow(workers, log_q, on_quit=lambda: None, on_autostart_toggle=lambda _: None)
+    assert win._log_widgets == {}
+    assert win._status_labels == {}
+
+
+@patch("mediactl.tk.Tk")
+@patch("mediactl.is_autostart_enabled", return_value=False)
+def test_status_window_show_creates_root(mock_autostart, mock_tk):
+    mock_root = _mock_tk_root()
+    mock_tk.return_value = mock_root
+
+    workers = [_make_worker()]
+    win = sut.StatusWindow(workers, queue.Queue(), on_quit=lambda: None, on_autostart_toggle=lambda _: None)
+
+    with patch.object(win, "_build") as mock_build:
+        win.show()
+        mock_build.assert_called_once()
+
+    mock_tk.reset_mock()
+    win._root = mock_root
+    win.show()
+    mock_root.deiconify.assert_called_once()
+    mock_root.lift.assert_called_once()
+    mock_tk.assert_not_called()
