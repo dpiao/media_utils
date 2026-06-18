@@ -87,7 +87,7 @@ WORKERS: list[dict] = [
     },
     {
         "name": "S3 Sync",
-        "cmd": [PYTHON, str(THIS_DIR / "sync_media_to_s3.py"), "--no-initial-sync"],
+        "cmd": [PYTHON, str(THIS_DIR / "sync_media_to_s3.py")],
         "cwd": THIS_DIR,
         "notifications": [
             {"prefix": "NOTIFY:Upload pending",    "title": "S3 upload pending"},

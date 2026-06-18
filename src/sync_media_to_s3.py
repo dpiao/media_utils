@@ -5,13 +5,14 @@ sync_media_to_s3.py — Watch local media folders and sync new/changed files to 
 Source folders  ->  S3 destination
   C:\\Movies\\   ->  s3://park.movies.archive/
   E:\\Movies\\   ->  s3://park.movies.archive/
+  E:\\Pics\\     ->  s3://park.photos.archive/
 
 Relative paths are preserved:
   C:\\Movies\\Action\\foo.mkv  ->  s3://park.movies.archive/Action/foo.mkv
 
 Upload guards:
-  1. Temp-extension filter  — .part / .crdownload / .!qb / .tmp / .download
-     are never uploaded (skipped in watcher and initial sync).
+  1. Temp-extension filter  — .part / .crdownload / .!qb / .tmp / .download /
+     .aac / .m4v are never uploaded (skipped in watcher and initial sync).
   2. Stability check        — a file is only uploaded after its size has been
      unchanged for --stable-secs (default: 60) consecutive seconds.
   3. Ignore file            — sync_media_to_s3.ignore (glob and re: patterns)
@@ -37,10 +38,11 @@ from watchdog.observers import Observer
 SOURCES: list[tuple[Path, str]] = [
     (Path(r"C:\Movies"),  "s3://park.movies.archive/"),
     (Path(r"E:\Movies"),  "s3://park.movies.archive/"),
+    (Path(r"E:\Pics"),    "s3://park.photos.archive/"),
 ]
 
 TEMP_EXTENSIONS: frozenset[str] = frozenset(
-    {".part", ".crdownload", ".!qb", ".tmp", ".download"}
+    {".part", ".crdownload", ".!qb", ".tmp", ".download", ".aac", ".m4v"}
 )
 
 IGNORE_FILE = Path(__file__).resolve().parent / "sync_media_to_s3.ignore"

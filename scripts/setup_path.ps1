@@ -15,4 +15,4 @@ $newPath = ($parts + $scriptsDir) -join ";"
 $env:Path = "$env:Path;$scriptsDir"
 
 Write-Host "Added to user PATH: $scriptsDir"
-Write-Host "Open a new terminal (or log out/in) to use: mediactl, render_vr360, sync_media_to_s3"
+Write-Host "Open a new terminal (or log out/in) to use: mediactl, render_vr360, sync_media_to_s3, concat_videos"

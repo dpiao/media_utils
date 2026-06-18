@@ -12,7 +12,7 @@ One-time: add launchers to your PATH (run from repo root, or double-click `scrip
 powershell -ExecutionPolicy Bypass -File scripts\setup_path.ps1
 ```
 
-Then you can run `mediactl`, `render_vr360`, and `sync_media_to_s3` from any terminal.
+Then you can run `mediactl`, `render_vr360`, `sync_media_to_s3`, and `concat_videos` from any terminal.
 
 Desktop shortcut (one-time):
 
@@ -251,3 +251,55 @@ scripts\sync_media_to_s3.cmd --dry-run
 1. **Temp extensions** — `.part`, `.crdownload`, `.!qb`, `.tmp`, `.download` are never uploaded
 2. **Stability check** — file must have the same size for `--stable-secs` seconds before upload
 3. **Ignore file** — patterns in `src/sync_media_to_s3.ignore` skip matching paths (glob `*`/`?`, or `re:` prefix for regex)
+
+---
+
+## concat_videos — Lossless video concatenation
+
+Concatenate 2+ compatible MP4/MKV/etc. files into one output video using ffmpeg stream copy
+(no re-encode). Probes each input first and fails with a per-file diff if settings do not match.
+
+### Dependencies
+
+| Tool | Purpose | Install |
+|---|---|---|
+| [FFmpeg](https://ffmpeg.org) | Concat demuxer + stream copy | `winget install Gyan.FFmpeg` |
+| [exiftool](https://exiftool.org) | Restore 360 metadata on output (VR inputs) | Same as render_vr360 |
+
+(`ffprobe` ships with FFmpeg.)
+
+Stream copy does not preserve XMP spherical tags from inputs. When all inputs share the
+same VR settings (detected from metadata or `360mono`-style filenames), those tags are
+re-injected on the output. Mixed VR/flat inputs or mismatched stereo modes fail.
+
+### Usage
+
+```bash
+# Output as first arg, then inputs
+concat_videos out.mp4 clip1.mp4 clip2.mp4 clip3.mp4
+
+# Explicit output flag
+concat_videos -o out.mp4 clip1.mp4 clip2.mp4
+
+# Validate only (no output written)
+concat_videos --dry-run clip1.mp4 clip2.mp4
+
+# Overwrite existing output
+concat_videos --force -o out.mp4 clip1.mp4 clip2.mp4
+```
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `-o`, `--output` | — | Output path (alternative to output-as-first-arg) |
+| `--dry-run` | off | Probe and validate only; exit 0 if compatible |
+| `--force` | off | Overwrite existing output file |
+
+### Compatibility checks
+
+All inputs are compared to the **first** file. These must match for stream-copy concat:
+
+- Video: width, height, codec, pixel format, frame rate
+- Audio: all inputs must have audio or none; if present — codec, sample rate, channels, channel layout
+- VR: all inputs must match (flat, or same equirectangular stereo mode)
