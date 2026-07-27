@@ -11,6 +11,7 @@ Layout:
 ```
 config/           Per-OS sync.toml + ignore rules (in-repo)
 src/sync/         S3 folder watcher (cross-platform)
+src/batch/        Batch rename (regex + captures)
 src/supervisor/   Tray supervisor — mediactl (Win + Mac)
 src/windows/      Windows-only: render_vr360, concat_videos
 scripts/windows/  .cmd / .ps1 launchers
@@ -54,8 +55,33 @@ Windows (`config/sync.windows.toml`) keeps `C:/Movies`, `E:/Movies` → movies a
 uv venv --python 3.11 .venv
 uv pip install -r requirements.txt
 # AWS CLI configured (`aws configure`)
-bash scripts/macos/setup_path.sh   # optional PATH
 ```
+
+`~/.zshrc` should include (so `mediactl`, `sync_media_to_s3`, `batch_files` resolve):
+
+```bash
+# media_utils scripts
+export PATH="$HOME/repos/media_utils/scripts/macos:$PATH"
+```
+
+---
+
+## Batch rename
+
+Recursive regex rename under a root folder. Dry-run by default; pass `--apply` to rename. Match is `fullmatch` on the **filename**; use `\1`, `\2`, … in `--replace`.
+
+```bash
+batch_files rename \
+  --root "~/Downloads/Telegram Desktop" \
+  --match '^(\d+) \((\d+)\)(\.[^.]+)$' \
+  --replace 'clip_\1_v\2\3'
+
+batch_files rename ... --apply
+```
+
+---
+
+## macOS (continued)
 
 Launchers prefer `.venv/bin/python` when present.
 
