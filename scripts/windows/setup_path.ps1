@@ -1,4 +1,4 @@
-# Add this repo's scripts/ folder to the current user's PATH (once).
+# Add this repo's scripts/windows folder to the current user's PATH (once).
 $scriptsDir = (Resolve-Path (Join-Path $PSScriptRoot ".")).Path
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
@@ -11,7 +11,6 @@ if ($parts -contains $scriptsDir) {
 $newPath = ($parts + $scriptsDir) -join ";"
 [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
 
-# Refresh PATH in this session
 $env:Path = "$env:Path;$scriptsDir"
 
 Write-Host "Added to user PATH: $scriptsDir"

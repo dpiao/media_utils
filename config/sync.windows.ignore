@@ -1,0 +1,10 @@
+# sync_media_to_s3.ignore — skip these paths for sync and upload.
+# Matched against the file path relative to each source root (e.g. C:\Movies\).
+#
+# Glob syntax: * (any chars) and ? (one char). Use forward slashes.
+#   **/pattern  — match in any subfolder
+#
+# Regex: prefix with re: (Python regex; also used for watcher/cp)
+#
+# VAM capture folders — skip timestamp-prefixed work-in-progress (YYYYMMDD-HHMMSS)
+V Vam My Render/202?????-??????*

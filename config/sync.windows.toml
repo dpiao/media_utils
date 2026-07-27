@@ -1,0 +1,11 @@
+[[sources]]
+path = "C:/Movies"
+s3 = "s3://park.movies.archive/"
+
+[[sources]]
+path = "E:/Movies"
+s3 = "s3://park.movies.archive/"
+
+[[sources]]
+path = "E:/Pics"
+s3 = "s3://park.photos.archive/"

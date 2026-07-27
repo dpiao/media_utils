@@ -6,300 +6,127 @@ Personal scripts for video post-processing and media management.
 pip install -r requirements.txt
 ```
 
-One-time: add launchers to your PATH (run from repo root, or double-click `scripts\setup_path.cmd`):
+Layout:
+
+```
+config/           Per-OS sync.toml + ignore rules (in-repo)
+src/sync/         S3 folder watcher (cross-platform)
+src/supervisor/   Tray supervisor — mediactl (Win + Mac)
+src/windows/      Windows-only: render_vr360, concat_videos
+scripts/windows/  .cmd / .ps1 launchers
+scripts/macos/    shell launchers
+tests/            pytest suite
+```
+
+---
+
+## Sync config
+
+Per-OS files live in the repo under `config/`:
+
+| OS | Sync config | Ignore file |
+|----|-------------|-------------|
+| macOS | `config/sync.macos.toml` | `config/sync.macos.ignore` |
+| Windows | `config/sync.windows.toml` | `config/sync.windows.ignore` |
+
+Runtime state (lock/socket) stays in `~/.config/media_utils/`.
+
+macOS (`config/sync.macos.toml`):
+
+```toml
+[[sources]]
+path = "~/Movies"
+s3 = "s3://park.movies.archive/"
+exclude = ["TV", "iTubeGo"]
+```
+
+`exclude` skips those top-level folders (and everything under them) for both the watcher and `aws s3 sync`. Also supported as a top-level `exclude = [...]`.
+
+Windows (`config/sync.windows.toml`) keeps `C:/Movies`, `E:/Movies` → movies archive and `E:/Pics` → photos archive.
+
+---
+
+## macOS
+
+### Setup
+
+```bash
+uv venv --python 3.11 .venv
+uv pip install -r requirements.txt
+# AWS CLI configured (`aws configure`)
+bash scripts/macos/setup_path.sh   # optional PATH
+```
+
+Launchers prefer `.venv/bin/python` when present.
+
+### Run sync alone
+
+```bash
+scripts/macos/sync_media_to_s3 --dry-run --no-initial-sync
+# or: PYTHONPATH=src python3 -m sync
+```
+
+### mediactl (menu bar supervisor)
+
+Supervises **S3 Sync only**.
+
+```bash
+scripts/macos/mediactl
+```
+
+- Menu bar icon → Show status / Start Stop Restart / Launch at startup / Quit
+- **Left-click** tray icon → status/control window; **right-click** → menu
+- Status window is a separate process (Tk cannot share the tray process on macOS) with Start/Stop/Restart, Launch at startup, Quit via Unix socket (`~/.config/media_utils/mediactl.sock`)
+- Autostart: LaunchAgent `~/Library/LaunchAgents/com.media_utils.mediactl.plist` (`KeepAlive`)
+
+### Logs (self-debug)
+
+| Log | Path | What to look for |
+|---|---|---|
+| Supervisor | `mediactl.log` (repo root) | `mediactl starting`, `Control socket listening`, `Tray icon ready`, `Worker … started/stopped`, `Control request: …`, `Opened status viewer` |
+| S3 Sync worker | `logs/s3_sync.log` | `Config:`, `Configured … → s3://…`, `watching`, `upload:`, `NOTIFY:`, aws errors |
+| Status window | `logs/status_viewer.log` | `Status viewer starting`, `UI start/stop/restart`, connect failures |
+| LaunchAgent | `~/Library/Logs/mediactl/launchd.out.log` / `.err.log` | crash stacks if the agent dies at login |
+
+Quick check:
+
+```bash
+tail -50 ~/repos/media_utils/mediactl.log
+tail -50 ~/repos/media_utils/logs/s3_sync.log
+pgrep -fl 'python -m supervisor|python -m sync'
+launchctl list | grep media_utils
+ls -la ~/.config/media_utils/
+```
+
+---
+
+## Windows
+
+### Setup
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\setup_path.ps1
+pip install -r requirements.txt
+powershell -ExecutionPolicy Bypass -File scripts\windows\setup_path.ps1
+powershell -ExecutionPolicy Bypass -File scripts\windows\create_desktop_shortcut.ps1
 ```
 
-Then you can run `mediactl`, `render_vr360`, `sync_media_to_s3`, and `concat_videos` from any terminal.
+### Tools
 
-Desktop shortcut (one-time):
+| Launcher | Role |
+|---|---|
+| `mediactl` | Tray supervisor: **Render VR360** + **S3 Sync** |
+| `sync_media_to_s3` | S3 watcher alone |
+| `render_vr360` | VAM frame sequence → VR/flat MP4 |
+| `concat_videos` | Lossless concat + VR metadata restore |
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1
-```
-
-## Repository layout
-
-```
-src/        Python source files
-scripts/    Windows .cmd launchers (double-click or call from PATH)
-tests/      pytest test suite
-```
+See prior docs for render_vr360 / concat_videos flags (unchanged behavior).
 
 ---
 
-## mediactl — Background supervisor
-
-System-tray app that runs `render_vr360` and `sync_media_to_s3` persistently in the
-background, sends Windows toast notifications on key events, and provides a per-script
-log viewer and status dashboard.
-
-### Quick start
-
-Double-click `scripts/mediactl.cmd`, or run it from a terminal. The console window
-closes immediately — mediactl runs silently as a tray icon.
-
-**Left-click** the tray icon to open the status dashboard. **Right-click** for the full menu.
-
-### Verifying it started
-
-Check `mediactl.log` in the repo root:
-
-```
-type mediactl.log
-```
-
-Per-worker stdout is also written to `logs/`:
-
-```
-logs/render_vr360.log
-logs/s3_sync.log
-```
-
-Key lines to look for:
-
-| Line | Meaning |
-|---|---|
-| `mediactl starting` | Process launched |
-| `Worker X started (pid …)` | Each worker is running |
-| `Tray icon ready and visible` | Tray icon appeared |
-| `NOTIFY … \| …` | A notification was dispatched |
-
-### Single-instance
-
-Running `mediactl.cmd` a second time exits immediately — a Windows named mutex
-(`Global\mediactl_singleton`) ensures only one instance runs at a time.
-
-### Tray icon
-
-Look for the icon in the system tray (bottom-right). If it is hidden, click the `^`
-arrow to reveal hidden icons.
-
-Right-click menu:
-
-| Item | Action |
-|---|---|
-| **Show status** | Opens the status dashboard (same as left-click) |
-| **Render VR360 › Stop/Start/Restart** | Control that worker |
-| **S3 Sync › Stop/Start/Restart** | Control that worker |
-| **Launch at startup** | Toggle Windows autostart (see below) |
-| **Quit** | Stop all workers and exit |
-
-### Status dashboard
-
-Left-click the tray icon (or *Show status* in the menu) to open a window with:
-
-- Per-worker status (running/stopped, pid, uptime)
-- Start / Stop / Restart buttons per worker
-- Live log tail per worker
-- Launch at startup checkbox and Quit button
-
-### Launch at startup
-
-*Right-click tray → Launch at startup* writes or removes a value under:
-
-```
-HKCU\Software\Microsoft\Windows\CurrentVersion\Run
-```
-
-Value name: `mediactl`  
-Value: `"<path\to\pythonw.exe>" "<path\to\src\mediactl.py>"`
-
-Windows reads this key at every user login and runs the command automatically.
-The menu item shows a checkmark when the entry is present.
-
-### Auto-restart
-
-If a worker script exits unexpectedly (any non-zero code) it is restarted
-automatically after 5 seconds.
-
-### Adding a new background script
-
-Add one entry to `WORKERS` in `src/mediactl.py`:
-
-```python
-{
-    "name": "My Script",
-    "cmd": [PYTHON, str(THIS_DIR / "my_script.py")],
-    "cwd": THIS_DIR,
-    "notifications": [
-        {"prefix": "NOTIFY:Job done", "title": "My Script finished"},
-    ],
-}
-```
-
-Print `NOTIFY:title|body` anywhere in the script to trigger a toast notification.
-
-### Dependencies
-
-| Package | Purpose |
-|---|---|
-| `pystray` | System tray icon |
-| `Pillow` | Icon rendering |
-
----
-
-## render_vr360 — VAM frame sequence encoder
-
-Assembles a [VAM Video Renderer](https://hub.virtamate.com/resources/video-renderer-for-3d-vr180-vr360-and-flat-2d-audio-bvh-animation-recorder.11994/)
-frame sequence (PNG or JPG + WAV) into an MP4. Injects 360 spherical metadata for VR
-outputs. Runs as a watch loop by default — mediactl starts it automatically.
-
-### Dependencies
-
-| Tool | Purpose | Install |
-|---|---|---|
-| [FFmpeg](https://ffmpeg.org) | Encoding | `winget install Gyan.FFmpeg` |
-| [exiftool](https://exiftool.org) | 360 metadata injection | Download zip, rename to `exiftool.exe`, place in `~/bin` |
-| Python 3.10+ | Script runtime | `winget install Python.Python.3` |
-
-### Usage
+## Tests
 
 ```bash
-# Watch loop (default) — polls every 10 s, renders all pending folders automatically
-scripts\render_vr360.cmd
-
-# Render all pending folders once and exit
-scripts\render_vr360.cmd --once
-
-# Render a specific folder
-scripts\render_vr360.cmd "C:\Games\Vam\Saves\VR_Renders\20260607-002259"
-
-# Re-render already-completed folders
-scripts\render_vr360.cmd --force
+cd /path/to/media_utils
+pip install -r requirements.txt
+pytest -q
 ```
-
-### Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `source` | auto | Folder to render; default scans `C:\Games\Vam\Saves\VR_Renders` for pending folders |
-| `-r`, `--framerate` | auto | Output fps; auto-detected from frame count / audio duration |
-| `--crf` | `20` | libx265 quality (0–51, lower = better) |
-| `--cq` | `20` | hevc_nvenc quality (0–51, lower = better) |
-| `--stereo` | `mono` | `mono`, `left-right`, or `top-bottom` |
-| `--output-name` | folder name | Base name for output file |
-| `--audio-offset` | `-0.3` | AV sync offset in seconds (negative = video leads audio) |
-| `--flat` | off | Force flat output (skip VR metadata) |
-| `--force` | off | Overwrite existing output and ignore completion markers |
-| `--once` | off | Render pending folders once and exit instead of watching |
-| `--interval` | `10` | Watch poll interval in seconds |
-
-### Output
-
-`C:\Movies\V Vam My Render\{name} {mode} {res} {fps}.mp4`
-
-Examples:
-- `20260608-014702 360mono 6k 60fps.mp4` — VR360, source ≥ 6k
-- `20260608-014702 flat 4k 30fps.mp4` — flat, source < 6k (auto-detected)
-
-### Auto-flat
-
-Sources below 6k (`max(width, height) < 5760`) are automatically rendered without VR
-metadata. Use `--flat` to force flat on any resolution.
-
-### Completion markers
-
-On success, `_RENDER_COMPLETE_.txt` is written into the source folder containing the
-output path and file size. This prevents re-rendering on the next watch cycle. Delete
-the marker or use `--force` to re-render.
-
-### Encoder strategy
-
-1. **hevc_nvenc** (NVIDIA GPU) — tried first, ~50% faster
-2. **libx265** (CPU) — automatic fallback
-
----
-
-## sync_media_to_s3 — S3 media sync
-
-Watches local movie folders and uploads new or changed files to S3, preserving relative
-paths. Configured for `C:\Movies\` and `E:\Movies\` → `s3://park.movies.archive/`.
-
-### Dependencies
-
-| Tool | Purpose | Install |
-|---|---|---|
-| [watchdog](https://pypi.org/project/watchdog/) | Filesystem events | `pip install watchdog` |
-| [AWS CLI](https://aws.amazon.com/cli/) | S3 upload | `winget install Amazon.AWSCLI` + `aws configure` |
-
-### Usage
-
-```bash
-# Start watcher (initial sync + watch)
-scripts\sync_media_to_s3.cmd
-
-# Skip initial sync
-scripts\sync_media_to_s3.cmd --no-initial-sync
-
-# Preview without uploading
-scripts\sync_media_to_s3.cmd --dry-run
-```
-
-### Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `--no-initial-sync` | off | Skip `aws s3 sync` on startup |
-| `--stable-secs N` | `60` | Seconds of unchanged file size before upload |
-| `--dry-run` | off | Print commands without executing |
-
-### Upload guards
-
-1. **Temp extensions** — `.part`, `.crdownload`, `.!qb`, `.tmp`, `.download` are never uploaded
-2. **Stability check** — file must have the same size for `--stable-secs` seconds before upload
-3. **Ignore file** — patterns in `src/sync_media_to_s3.ignore` skip matching paths (glob `*`/`?`, or `re:` prefix for regex)
-
----
-
-## concat_videos — Lossless video concatenation
-
-Concatenate 2+ compatible MP4/MKV/etc. files into one output video using ffmpeg stream copy
-(no re-encode). Probes each input first and fails with a per-file diff if settings do not match.
-
-### Dependencies
-
-| Tool | Purpose | Install |
-|---|---|---|
-| [FFmpeg](https://ffmpeg.org) | Concat demuxer + stream copy | `winget install Gyan.FFmpeg` |
-| [exiftool](https://exiftool.org) | Restore 360 metadata on output (VR inputs) | Same as render_vr360 |
-
-(`ffprobe` ships with FFmpeg.)
-
-Stream copy does not preserve XMP spherical tags from inputs. When all inputs share the
-same VR settings (detected from metadata or `360mono`-style filenames), those tags are
-re-injected on the output. Mixed VR/flat inputs or mismatched stereo modes fail.
-
-### Usage
-
-```bash
-# Output as first arg, then inputs
-concat_videos out.mp4 clip1.mp4 clip2.mp4 clip3.mp4
-
-# Explicit output flag
-concat_videos -o out.mp4 clip1.mp4 clip2.mp4
-
-# Validate only (no output written)
-concat_videos --dry-run clip1.mp4 clip2.mp4
-
-# Overwrite existing output
-concat_videos --force -o out.mp4 clip1.mp4 clip2.mp4
-```
-
-### Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `-o`, `--output` | — | Output path (alternative to output-as-first-arg) |
-| `--dry-run` | off | Probe and validate only; exit 0 if compatible |
-| `--force` | off | Overwrite existing output file |
-
-### Compatibility checks
-
-All inputs are compared to the **first** file. These must match for stream-copy concat:
-
-- Video: width, height, codec, pixel format, frame rate
-- Audio: all inputs must have audio or none; if present — codec, sample rate, channels, channel layout
-- VR: all inputs must match (flat, or same equirectangular stereo mode)

@@ -1,28 +1,9 @@
 #!/usr/bin/env python3
-"""
-sync_media_to_s3.py — Watch local media folders and sync new/changed files to S3.
+"""Watch local media folders and sync new/changed files to S3."""
 
-Source folders  ->  S3 destination
-  C:\\Movies\\   ->  s3://park.movies.archive/
-  E:\\Movies\\   ->  s3://park.movies.archive/
-  E:\\Pics\\     ->  s3://park.photos.archive/
-
-Relative paths are preserved:
-  C:\\Movies\\Action\\foo.mkv  ->  s3://park.movies.archive/Action/foo.mkv
-
-Upload guards:
-  1. Temp-extension filter  — .part / .crdownload / .!qb / .tmp / .download /
-     .aac / .m4v are never uploaded (skipped in watcher and initial sync).
-  2. Stability check        — a file is only uploaded after its size has been
-     unchanged for --stable-secs (default: 60) consecutive seconds.
-  3. Ignore file            — sync_media_to_s3.ignore (glob and re: patterns)
-
-Dependencies: watchdog (pip install watchdog), AWS CLI (aws configure)
-"""
+from __future__ import annotations
 
 import argparse
-import fnmatch
-import re
 import subprocess
 import sys
 import threading
@@ -32,126 +13,43 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-
-# ── Config ────────────────────────────────────────────────────────────────────
-
-SOURCES: list[tuple[Path, str]] = [
-    (Path(r"C:\Movies"),  "s3://park.movies.archive/"),
-    (Path(r"E:\Movies"),  "s3://park.movies.archive/"),
-    (Path(r"E:\Pics"),    "s3://park.photos.archive/"),
-]
+from sync import config as sync_config
+from sync.ignore import IgnoreRules, is_ignored_by_rules
 
 TEMP_EXTENSIONS: frozenset[str] = frozenset(
     {".part", ".crdownload", ".!qb", ".tmp", ".download", ".aac", ".m4v"}
 )
 
-IGNORE_FILE = Path(__file__).resolve().parent / "sync_media_to_s3.ignore"
-
-
-# ── Ignore rules ──────────────────────────────────────────────────────────────
-
-class IgnoreRules:
-    """Patterns from sync_media_to_s3.ignore (glob and re: lines)."""
-
-    def __init__(self, globs: list[str], regexes: list[re.Pattern[str]]) -> None:
-        self._globs = globs
-        self._regexes = regexes
-
-    @classmethod
-    def empty(cls) -> "IgnoreRules":
-        return cls([], [])
-
-    @classmethod
-    def load(cls, path: Path = IGNORE_FILE) -> "IgnoreRules":
-        globs: list[str] = []
-        regexes: list[re.Pattern[str]] = []
-        if not path.is_file():
-            return cls(globs, regexes)
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("re:"):
-                regexes.append(re.compile(line[3:].strip()))
-            else:
-                globs.append(line)
-        return cls(globs, regexes)
-
-    def is_ignored(self, rel_path: str) -> bool:
-        rel = rel_path.replace("\\", "/")
-        for pattern in self._globs:
-            if _glob_match(rel, pattern):
-                return True
-        for rx in self._regexes:
-            if rx.search(rel):
-                return True
-        return False
-
-    def aws_exclude_args(self) -> list[str]:
-        args: list[str] = []
-        for pattern in self._globs:
-            args += ["--exclude", pattern]
-        return args
-
-
-def _glob_match(rel: str, pattern: str) -> bool:
-    if pattern.startswith("**/"):
-        suffix = pattern[3:]
-        if fnmatch.fnmatch(rel, suffix):
-            return True
-        parts = rel.split("/")
-        for i in range(len(parts)):
-            if fnmatch.fnmatch("/".join(parts[i:]), suffix):
-                return True
-        return False
-    return fnmatch.fnmatch(rel, pattern)
-
-
-def is_ignored_by_rules(
-    local_root: Path,
-    file_path: Path,
-    ignore: IgnoreRules,
-) -> bool:
-    try:
-        rel = file_path.relative_to(local_root).as_posix()
-    except ValueError:
-        return False
-    return ignore.is_ignored(rel)
-
-
-def should_skip(
-    local_root: Path,
-    file_path: Path,
-    ignore: IgnoreRules,
-) -> bool:
-    if is_temp(file_path):
-        return True
-    return is_ignored_by_rules(local_root, file_path, ignore)
-
-
-# ── Logging ───────────────────────────────────────────────────────────────────
 
 def _ts() -> str:
     return time.strftime("%H:%M:%S")
 
+
 def info(msg: str) -> None:
     print(f"[{_ts()}]  {msg}")
+
 
 def step(msg: str) -> None:
     print(f"\n[{_ts()}] [*] {msg}")
 
+
 def ok(msg: str) -> None:
     print(f"[{_ts()}]  -> {msg}")
+
 
 def warn(msg: str) -> None:
     print(f"[{_ts()}]  [!] {msg}", file=sys.stderr)
     print(f"NOTIFY:Warning|{msg}", flush=True)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 def is_temp(path: Path) -> bool:
     return path.suffix.lower() in TEMP_EXTENSIONS
+
+
+def should_skip(local_root: Path, file_path: Path, ignore: IgnoreRules) -> bool:
+    if is_temp(file_path):
+        return True
+    return is_ignored_by_rules(local_root, file_path, ignore)
 
 
 def s3_key(local_root: Path, file_path: Path, s3_prefix: str) -> str:
@@ -168,7 +66,11 @@ def run_aws(cmd: list[str], dry_run: bool) -> None:
             info(f"uploading  {cmd[3]}  ->  {cmd[4]}")
         elif cmd[2] == "sync":
             info(f"syncing  {cmd[3]}  ->  {cmd[4]}")
-    result = subprocess.run(cmd)
+    try:
+        result = subprocess.run(cmd)
+    except FileNotFoundError:
+        warn("aws CLI not found on PATH — install AWS CLI or fix PATH")
+        return
     if result.returncode != 0:
         warn(f"aws exited {result.returncode}")
 
@@ -186,20 +88,14 @@ def upload_file(
     run_aws(["aws", "s3", "cp", str(file_path), dest], dry_run)
 
 
-# ── Stability checker ─────────────────────────────────────────────────────────
-
 class StabilityChecker:
-    """
-    Deduplicates file events and uploads each file only after its size has
-    been stable for `stable_secs` consecutive seconds.
-    """
+    """Upload each file only after size is stable for stable_secs."""
 
     def __init__(self, stable_secs: int, dry_run: bool, ignore: IgnoreRules) -> None:
         self._stable_secs = stable_secs
         self._dry_run = dry_run
         self._ignore = ignore
         self._lock = threading.Lock()
-        # path → (local_root, s3_prefix, last_size, last_changed_at)
         self._pending: dict[Path, tuple[Path, str, int, float]] = {}
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -216,7 +112,6 @@ class StabilityChecker:
                 if size != last_size:
                     self._pending[file_path] = (local_root, s3_prefix, size, time.monotonic())
                 else:
-                    # duplicate event (created+modified) — keep stability timer
                     self._pending[file_path] = (local_root, s3_prefix, size, last_changed)
                 return
             self._pending[file_path] = (local_root, s3_prefix, size, time.monotonic())
@@ -264,7 +159,6 @@ def should_handle_modified(
     now: float | None = None,
     recent_secs: float = 120,
 ) -> bool:
-    """True when a modified event reflects a real content change worth syncing."""
     fp = file_fingerprint(path)
     if fp is None:
         return False
@@ -277,6 +171,7 @@ def should_handle_modified(
         if age > recent_secs:
             return False
     return True
+
 
 class MediaHandler(FileSystemEventHandler):
     def __init__(
@@ -324,26 +219,45 @@ class MediaHandler(FileSystemEventHandler):
             self._handle(event.dest_path)
 
 
-# ── Initial sync ──────────────────────────────────────────────────────────────
-
 def initial_sync(
     local_root: Path,
     s3_prefix: str,
     dry_run: bool,
     ignore: IgnoreRules,
 ) -> None:
+    """
+    Sync each top-level child separately so excluded / unreadable folders
+    (e.g. TV) are never entered by aws.
+    """
     step(f"Initial sync: {local_root}  →  {s3_prefix}")
     exclude_args: list[str] = []
     for ext in sorted(TEMP_EXTENSIONS):
         exclude_args += ["--exclude", f"*{ext}"]
     exclude_args += ignore.aws_exclude_args()
-    run_aws(
-        ["aws", "s3", "sync", str(local_root), s3_prefix] + exclude_args,
-        dry_run,
-    )
 
+    try:
+        children = sorted(local_root.iterdir(), key=lambda p: p.name.lower())
+    except OSError as exc:
+        warn(f"Cannot list {local_root}: {exc}")
+        return
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+    for child in children:
+        name = child.name
+        if ignore.is_ignored(name):
+            info(f"skipping excluded  {child}")
+            continue
+        if child.is_dir():
+            dest = s3_prefix.rstrip("/") + "/" + name
+            run_aws(
+                ["aws", "s3", "sync", str(child), dest] + exclude_args,
+                dry_run,
+            )
+        elif child.is_file():
+            if should_skip(local_root, child, ignore):
+                continue
+            dest = s3_key(local_root, child, s3_prefix)
+            run_aws(["aws", "s3", "cp", str(child), dest], dry_run)
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -371,12 +285,26 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    ignore = IgnoreRules.load()
-    if ignore._globs or ignore._regexes:
-        info(f"Loaded {len(ignore._globs)} glob + {len(ignore._regexes)} regex ignore rules from {IGNORE_FILE.name}")
+    config_path = sync_config.ensure_user_config()
+    info(f"Config: {config_path}")
+    sources = sync_config.load_sources(config_path)
+    for root, prefix in sources:
+        info(f"Configured  {root}  →  {prefix}")
 
-    active_sources = [(root, prefix) for root, prefix in SOURCES if root.is_dir()]
-    missing = [root for root, _ in SOURCES if not root.is_dir()]
+    ignore_path = sync_config.resolve_ignore_path()
+    ignore = IgnoreRules.load(ignore_path)
+    excludes = sync_config.load_excludes(config_path)
+    if excludes:
+        info(f"Config excludes: {', '.join(excludes)}")
+        ignore = ignore.with_extra_globs(excludes)
+    if ignore._globs or ignore._regexes:
+        info(
+            f"Loaded {len(ignore._globs)} glob + {len(ignore._regexes)} regex "
+            f"ignore rules (ignore file + config)"
+        )
+
+    active_sources = [(root, prefix) for root, prefix in sources if root.is_dir()]
+    missing = [root for root, _ in sources if not root.is_dir()]
     for m in missing:
         warn(f"Source folder not found, skipping: {m}")
     if not active_sources:

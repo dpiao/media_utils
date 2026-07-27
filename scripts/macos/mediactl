@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUNBUFFERED=1
+if [[ -x "$ROOT/.venv/bin/python" ]]; then
+  PY="$ROOT/.venv/bin/python"
+else
+  PY="${PYTHON:-python3}"
+fi
+# Detach from terminal when launched interactively
+if [[ -t 1 ]]; then
+  nohup "$PY" -m supervisor "$@" >>"$ROOT/mediactl.log" 2>&1 &
+  echo "mediactl started (pid $!) — see $ROOT/mediactl.log"
+else
+  exec "$PY" -m supervisor "$@"
+fi

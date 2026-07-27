@@ -139,11 +139,12 @@ def test_validate_compatibility_audio_sample_rate_mismatch() -> None:
 
 # ── build_concat_list ─────────────────────────────────────────────────────────
 
-def test_build_concat_list_paths() -> None:
-    paths = [Path(r"C:\Movies\a.mp4"), Path(r"C:\Movies\b.mp4")]
-    text = sut.build_concat_list(paths)
-    assert "file 'C:/Movies/a.mp4'" in text
-    assert "file 'C:/Movies/b.mp4'" in text
+def test_build_concat_list_paths(tmp_path: Path) -> None:
+    a = tmp_path / "a.mp4"
+    b = tmp_path / "b.mp4"
+    text = sut.build_concat_list([a, b])
+    assert f"file '{a.resolve().as_posix()}'" in text
+    assert f"file '{b.resolve().as_posix()}'" in text
 
 
 def test_build_concat_list_escapes_quotes(tmp_path: Path) -> None:
@@ -187,10 +188,11 @@ def test_resolve_vr_stereo_mode_different_stereo() -> None:
 def test_inject_vr_metadata_replaces_unicode_output(tmp_path: Path) -> None:
     src = tmp_path / "out \u9a91\u5177.mp4"
     src.write_bytes(b"video")
-    with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
-        with patch("os.link") as mock_link:
-            with patch("os.replace") as mock_replace:
-                sut.inject_vr_metadata(src, "mono")
+    with patch("shutil.which", return_value="/usr/bin/exiftool"):
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            with patch("os.link") as mock_link:
+                with patch("os.replace") as mock_replace:
+                    sut.inject_vr_metadata(src, "mono")
     mock_link.assert_called_once()
     mock_replace.assert_called_once()
     replaced_to = mock_replace.call_args.args[1]
@@ -200,9 +202,10 @@ def test_inject_vr_metadata_replaces_unicode_output(tmp_path: Path) -> None:
 def test_inject_vr_metadata_skips_replace_for_ascii_path(tmp_path: Path) -> None:
     src = tmp_path / "out.mp4"
     src.write_bytes(b"video")
-    with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
-        with patch("os.replace") as mock_replace:
-            sut.inject_vr_metadata(src, "mono")
+    with patch("shutil.which", return_value="/usr/bin/exiftool"):
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            with patch("os.replace") as mock_replace:
+                sut.inject_vr_metadata(src, "mono")
     mock_replace.assert_not_called()
 
 

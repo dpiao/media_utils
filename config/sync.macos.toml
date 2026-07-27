@@ -1,0 +1,5 @@
+[[sources]]
+path = "~/Movies"
+s3 = "s3://park.movies.archive/"
+# Top-level folders under the source to skip (watcher + aws s3 sync)
+exclude = ["TV", "iTubeGo"]
