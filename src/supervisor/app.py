@@ -17,6 +17,7 @@ from supervisor.icon import load_icon
 from supervisor.ipc import ControlServer
 from supervisor.paths import APP_NAME, LOG_FILE, REPO_ROOT, SRC_DIR
 from supervisor.status_ipc import raise_existing
+from supervisor.log_coalesce import LogEntry
 from supervisor.status_window import StatusWindow
 from supervisor.worker import WorkerProcess, worker_python
 
@@ -41,7 +42,7 @@ sys.excepthook = _log_uncaught
 
 class TrayApp:
     def __init__(self) -> None:
-        self._log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._log_queue: queue.Queue[LogEntry] = queue.Queue()
         workers_cfg = plat.get_workers()
         self._workers = [
             WorkerProcess(cfg, self._log_queue, self._on_notify) for cfg in workers_cfg

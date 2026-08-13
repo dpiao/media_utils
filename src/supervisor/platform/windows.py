@@ -93,12 +93,18 @@ def get_workers() -> list[dict]:
                 {"prefix": "NOTIFY:Render complete", "title": "Render complete"},
                 {"prefix": "NOTIFY:Render failed", "title": "Render failed"},
             ],
+            "progress_patterns": [
+                r"^\s*(hevc_nvenc|libx265)\s+\[",
+            ],
         },
         {
             "name": "S3 Sync",
             "cmd": [python, "-m", "sync"],
             "cwd": REPO_ROOT,
             "notifications": sync_notifications,
+            "progress_patterns": [
+                r"^Completed .+ with .+ remaining",
+            ],
         },
     ]
 

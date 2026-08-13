@@ -10,6 +10,7 @@ def test_load_sources_expands_tilde(tmp_path, monkeypatch):
     movies = home / "Movies"
     movies.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     cfg = tmp_path / "sync.macos.toml"
     cfg.write_text(
         '[[sources]]\npath = "~/Movies"\ns3 = "s3://park.movies.archive/"\n',

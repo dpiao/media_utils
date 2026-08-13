@@ -160,6 +160,9 @@ def get_workers() -> list[dict]:
                 {"prefix": "NOTIFY:Uploaded to S3", "title": "S3 upload complete"},
                 {"prefix": "NOTIFY:Warning", "title": "S3 Sync warning"},
             ],
+            "progress_patterns": [
+                r"^Completed .+ with .+ remaining",
+            ],
         },
     ]
 

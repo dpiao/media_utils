@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 
+from supervisor.log_coalesce import LogCoalescer, LogEntry, LogMode, ProgressFileThrottle
 from supervisor.paths import LOGS_DIR, SRC_DIR
 
 _log = logging.getLogger("mediactl")
@@ -30,12 +31,15 @@ class WorkerProcess:
     puts lines into `log_queue`, fires callbacks for NOTIFY: lines.
     """
 
-    def __init__(self, config: dict, log_queue: queue.Queue[tuple[str, str]], notify_cb) -> None:
+    def __init__(self, config: dict, log_queue: queue.Queue[LogEntry], notify_cb) -> None:
         self.name: str = config["name"]
         self._cmd: list[str] = config["cmd"]
         self._cwd: Path = config["cwd"]
         self._env_extra: dict[str, str] = config.get("env") or {}
         self._notifications: list[dict] = config["notifications"]
+        self._progress_patterns: list[str] = list(config.get("progress_patterns", []))
+        self._coalescer = LogCoalescer(self._progress_patterns)
+        self._file_throttle = ProgressFileThrottle()
         self._log_queue = log_queue
         self._notify_cb = notify_cb
         self._proc: subprocess.Popen | None = None
@@ -129,8 +133,25 @@ class WorkerProcess:
     def log_path(self) -> Path:
         return self._log_path
 
-    def _log(self, line: str) -> None:
-        self._log_queue.put((self.name, line))
+    @property
+    def progress_patterns(self) -> list[str]:
+        return self._progress_patterns
+
+    def _log(self, line: str, mode: LogMode = "append", *, is_progress: bool = False) -> None:
+        self._log_queue.put((self.name, line, mode))
+        for file_line in self._file_lines(line, mode, is_progress):
+            self._write_file_line(file_line)
+
+    def _file_lines(self, line: str, mode: LogMode, is_progress: bool) -> list[str]:
+        if not is_progress:
+            flushed = self._file_throttle.flush_before_normal()
+            return [flushed, line] if flushed else [line]
+        if mode == "append":
+            return [self._file_throttle.note_append_progress(line)]
+        disk_line = self._file_throttle.note_replace(line)
+        return [disk_line] if disk_line else []
+
+    def _write_file_line(self, line: str) -> None:
         try:
             if self._log_fh is None:
                 self._log_fh = open(self._log_path, "a", encoding="utf-8", buffering=1)
@@ -146,7 +167,8 @@ class WorkerProcess:
             for raw in proc.stdout:
                 line = raw.rstrip()
                 self._dispatch(line)
-                self._log(line)
+                mode, is_progress = self._coalescer.process(line)
+                self._log(line, mode, is_progress=is_progress)
         except Exception as exc:
             _log.warning("Worker %s read error: %s", self.name, exc)
         finally:

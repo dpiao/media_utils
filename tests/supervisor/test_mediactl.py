@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from supervisor.app import TrayApp
+from supervisor import log_coalesce as lc
+from supervisor.platform import windows as win_plat
 from supervisor.status_window import StatusWindow
 from supervisor.worker import WorkerProcess, worker_python
 
@@ -161,7 +163,7 @@ def test_read_loop_puts_lines_in_log_queue():
 
     lines_received = []
     while not log_q.empty():
-        _, line = log_q.get_nowait()
+        _, line, _mode = log_q.get_nowait()
         lines_received.append(line)
     assert "hello" in lines_received
     assert "world" in lines_received
@@ -226,10 +228,55 @@ def test_status_window_show_creates_root(mock_autostart, mock_tk):
 
 @win32_only
 def test_windows_workers_include_render_and_sync():
-    from supervisor.platform import windows as win
-
-    names = [w["name"] for w in win.get_workers()]
+    names = [w["name"] for w in win_plat.get_workers()]
     assert names == ["Render VR360", "S3 Sync"]
+
+
+def test_workers_progress_patterns_compile() -> None:
+    for cfg in win_plat.get_workers():
+        for pat in cfg.get("progress_patterns", []):
+            __import__("re").compile(pat)
+
+
+def test_coalescer_ffmpeg_progress_replace() -> None:
+    c = lc.LogCoalescer([r"^\s*(hevc_nvenc|libx265)\s+\["])
+    line = "  hevc_nvenc  [####-----]  40.0%  frame 100/250  25.0 fps  ETA 00:06"
+    assert c.process(line) == ("append", True)
+    assert c.process(line) == ("replace", True)
+    assert c.process("[*] Encoding done") == ("append", False)
+
+
+def test_coalescer_aws_progress_replace() -> None:
+    c = lc.LogCoalescer([r"^Completed .+ with .+ remaining"])
+    line = "Completed 58.0 GiB/58.0 GiB (4.6 MiB/s) with 1 file(s) remaining"
+    assert c.process(line) == ("append", True)
+    assert c.process(line) == ("replace", True)
+
+
+def test_coalescer_resets_after_normal_line() -> None:
+    c = lc.LogCoalescer([r"^\s*(hevc_nvenc|libx265)\s+\["])
+    prog = "  libx265  [##-------]  10.0%  frame 10/100  20.0 fps  ETA 00:04"
+    c.process(prog)
+    c.process(prog)
+    c.process("normal log line")
+    assert c.process(prog) == ("append", True)
+
+
+def test_progress_file_throttle_interval() -> None:
+    throttle = lc.ProgressFileThrottle()
+    line = "Completed 1.0 GiB/10.0 GiB (1.0 MiB/s) with 1 file(s) remaining"
+    assert throttle.note_replace(line) == line
+    assert throttle.note_replace(line) is None
+    throttle._last_write_at = time.monotonic() - lc.FILE_PROGRESS_INTERVAL_SEC - 1
+    assert throttle.note_replace(line) == line
+
+
+def test_progress_file_throttle_flush_before_normal() -> None:
+    throttle = lc.ProgressFileThrottle()
+    line = "  hevc_nvenc  [##########]  99.0%  frame 99/100  25.0 fps  ETA 00:00"
+    throttle.note_replace(line)
+    assert throttle.flush_before_normal() == line
+    assert throttle.flush_before_normal() is None
 
 
 @win32_only

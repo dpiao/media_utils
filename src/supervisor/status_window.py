@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import font as tkfont
@@ -10,6 +11,7 @@ from tkinter import scrolledtext
 
 from supervisor import platform as plat
 from supervisor.icon import apply_tk_icon
+from supervisor.log_coalesce import LogEntry, LogMode
 from supervisor.worker import WorkerProcess
 
 _BG = "#1e1e1e"
@@ -25,7 +27,7 @@ class StatusWindow:
     def __init__(
         self,
         workers: list[WorkerProcess],
-        log_queue: queue.Queue[tuple[str, str]],
+        log_queue: queue.Queue[LogEntry],
         on_quit,
         on_autostart_toggle,
     ) -> None:
@@ -36,6 +38,7 @@ class StatusWindow:
         self._root: tk.Tk | None = None
         self._log_widgets: dict[str, scrolledtext.ScrolledText] = {}
         self._line_counts: dict[str, int] = {}
+        self._last_is_progress: dict[str, bool] = {}
         self._status_labels: dict[str, tk.Label] = {}
         self._dot_labels: dict[str, tk.Label] = {}
         self._autostart_var: tk.BooleanVar | None = None
@@ -169,8 +172,8 @@ class StatusWindow:
             return
         try:
             while True:
-                name, line = self._log_queue.get_nowait()
-                self._append(name, line)
+                name, line, mode = self._log_queue.get_nowait()
+                self._append(name, line, mode)
         except queue.Empty:
             pass
         self._refresh_status()
@@ -190,15 +193,32 @@ class StatusWindow:
                 dot.configure(fg=_RED)
                 label.configure(text="stopped")
 
-    def _append(self, name: str, line: str) -> None:
+    def _append(self, name: str, line: str, mode: LogMode) -> None:
         txt = self._log_widgets.get(name)
         if not txt:
             return
         txt.configure(state=tk.NORMAL)
+        if mode == "replace" and self._last_is_progress.get(name):
+            txt.delete("end-2l linestart", "end-1c")
+        else:
+            self._line_counts[name] = self._line_counts.get(name, 0) + 1
         txt.insert(tk.END, line + "\n")
-        self._line_counts[name] = self._line_counts.get(name, 0) + 1
+        self._last_is_progress[name] = mode == "replace" or (
+            mode == "append" and self._line_is_progress(name, line)
+        )
         if self._line_counts[name] > self.MAX_LINES:
             txt.delete("1.0", "100.0")
             self._line_counts[name] = max(0, self._line_counts[name] - 100)
+            self._last_is_progress[name] = False
         txt.see(tk.END)
         txt.configure(state=tk.DISABLED)
+
+    def _line_is_progress(self, name: str, line: str) -> bool:
+        for worker in self._workers:
+            if worker.name != name:
+                continue
+            for pat in worker.progress_patterns:
+                if re.match(pat, line):
+                    return True
+            break
+        return False

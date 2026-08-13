@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 from pathlib import Path
 
 import pytest
 
 from supervisor import status_ipc
+
+darwin_only = pytest.mark.skipif(sys.platform != "darwin", reason="macOS-only")
 
 
 @pytest.fixture
@@ -27,6 +30,11 @@ def test_raise_existing_false_when_no_server(short_sock):
     assert status_ipc.raise_existing() is False
 
 
+def test_raise_existing_false_when_no_server(short_sock):
+    assert status_ipc.raise_existing() is False
+
+
+@darwin_only
 def test_raise_existing_calls_handler(short_sock):
     hit = threading.Event()
     server = status_ipc.StatusRaiseServer(hit.set)
