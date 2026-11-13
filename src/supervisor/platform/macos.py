@@ -162,6 +162,7 @@ def get_workers() -> list[dict]:
             ],
             "progress_patterns": [
                 r"^Completed .+ with .+ remaining",
+                r"^\[\d{2}:\d{2}:\d{2}\]  ignored  ",
             ],
         },
     ]
